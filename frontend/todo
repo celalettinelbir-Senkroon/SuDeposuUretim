@@ -1,0 +1,27 @@
+﻿[x] useTenant hook yazildi
+[x] window.location.hostname -> "ekomaxi" slug cikartiliyor
+[x] src/hooks/ altina eklendi
+
+[x] TenantContext olusturuldu
+[x] slug + logo + renk + firma adi global state ile yonetiliyor
+[x] src/context/ altina eklendi
+
+[ ] Django'da /api/tenant/config/ endpoint ac
+[ ] AllowAny + name + logo + primary_color dondur
+
+[x] App.tsx'e TenantProvider eklendi
+[x] Tum uygulama provider ile sarildi
+
+[ ] Django'da JWT kur (simplejwt)
+[ ] /api/auth/token/ endpoint aktif olsun
+
+[x] Login sayfasi yazildi
+[x] Tenant logo + renkleriyle white-label form eklendi
+[x] src/pages/ altina eklendi
+
+[x] Token tenant bazli saklaniyor
+[x] localStorage key: token_ekomaxi (tenant slug ile)
+[x] src/auth/ altina eklendi
+
+[x] ProtectedRoute bileseni yazildi
+[x] Token yoksa /login'e yonlendiriyor
