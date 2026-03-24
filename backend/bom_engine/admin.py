@@ -14,6 +14,25 @@ from .models import (
 # 1. ANA VERİ (MASTER DATA) - IMPORT/EXPORT İLE
 # ==========================================
 
+from import_export import resources, fields
+
+# Kategori Eşleştirme Sözlüğü (Excel'den gelen -> Veritabanına yazılacak)
+CATEGORY_MAPPING = {
+    "1 - Duvar Panelleri": "duvar_paneli",
+    "2 - Düz Taban Panlleri": "duz_taban_paneli",
+    "3 - Bombeli Taban Panelleri": "bombeli_taban_paneli",
+    "4 - Tavan Panelleri": "tavan_paneli",
+    "5 - Bölme Panelleri": "bolme_paneli",
+    "8 - Kapaklı Duvar Paneli": "kapakli_duvar_paneli",
+    "6 - İçten Takviye": "icten_takviye",
+    "7 - Dıştan Takviye": "distan_takviye",
+    "70 - Kaide Ara Bağlantı": "kaide_ara_baglanti",
+    "71 - Kaide Ekli Bağlantı": "kaide_ekli_baglanti",
+    "72 - Kaide Tekli Bağlantı": "kaide_tekli_baglanti",
+    "73 - Kaide Birleştirme": "kaide_birlestirme",
+    "21 - Aksesuarlar": "aksesuar",
+}
+
 class StockCardResource(resources.ModelResource):
     stock_code = fields.Field(column_name='Yen Mal Kod', attribute='stock_code')
     stock_code_1 = fields.Field(column_name='Yen Mal Kod 1', attribute='stock_code_1')
@@ -23,6 +42,10 @@ class StockCardResource(resources.ModelResource):
     bom_width_mm = fields.Field(column_name='En (cm)', attribute='bom_width_mm')
     bom_length_mm = fields.Field(column_name='Boy (cm)', attribute='bom_length_mm')
     bom_category_code1 = fields.Field(column_name='BOM Kategori Kodu 1', attribute='bom_category_code1')
+    
+    # YENİ EKLENEN ALAN: Sütun adını kendi Excel'ine göre güncelle!
+    bom_category_code2 = fields.Field(column_name='BOM Kategori Kodu 2', attribute='bom_category_code2')
+    
     is_passive = fields.Field(column_name='Pasif mi?', attribute='is_passive')
     
     class Meta:
@@ -39,7 +62,9 @@ class StockCardResource(resources.ModelResource):
         return super().skip_row(instance, original, row, import_validation_errors)
 
     def before_import_row(self, row, **kwargs):
-        """Veriler veritabanına yazılmadan önce sayılara dönüştürme ve mm hesabı yapıyoruz."""
+        """Veriler veritabanına yazılmadan önce temizleme ve dönüşüm işlemleri yapılır."""
+        
+        # 1. Sayısal Değerleri Temizleme ve Hesaplama
         def clean_number(val):
             if not val or str(val).strip() == '':
                 return None
@@ -60,6 +85,20 @@ class StockCardResource(resources.ModelResource):
         boy_cm = clean_number(row.get('Boy (cm)'))
         row['Boy (cm)'] = boy_cm * 10 if boy_cm is not None else None
 
+        # 2. Kategori Verisini Eşleştirme (Mapping) İşlemi
+        # Sütun adını kendi Excel'indeki başlığa göre değiştirmeyi unutma!
+        excel_category_column = 'BOM Kategori Kodu 2' 
+        
+        raw_category = row.get(excel_category_column)
+        
+        if raw_category:
+            raw_category_str = str(raw_category).strip()
+            # Sözlükte arar, bulursa temiz halini (örn: 'duvar_paneli') yazar.
+            # Eğer sözlükte karşılığı yoksa (beklenmeyen bir veri geldiyse) None atar.
+            clean_category = CATEGORY_MAPPING.get(raw_category_str, None)
+            row[excel_category_column] = clean_category
+
+
 
 @admin.register(StockCard)
 class StockCardAdmin(ImportExportModelAdmin):
@@ -78,8 +117,6 @@ class StockCardAdmin(ImportExportModelAdmin):
     search_fields = ('stock_code', 'stock_name') # autocomplete_fields için kritik!
     list_filter = ('is_passive', 'unit_name', 'bom_category_code1')
     ordering = ('stock_code',)
-
-
 # ==========================================
 # 2. VARYANT ÇEVİRMENİ
 # ==========================================

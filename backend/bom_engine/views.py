@@ -1,4 +1,6 @@
-from decimal import Decimal, InvalidOperation, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
+
+from django.db.models import Q
 
 from django.http import JsonResponse
 from rest_framework.permissions import AllowAny
@@ -8,6 +10,18 @@ from .models import ReferenceBomHeader, ReferenceBomLine, StandardCategory, Stoc
 
 
 WALL_MODULE_HEIGHT_M = Decimal("0.5")
+FULL_PANEL_WIDTH_MM = Decimal("1080")
+FULL_PANEL_LENGTH_MM = Decimal("1080")
+HALF_PANEL_WIDTH_MM = Decimal("540")
+HALF_PANEL_LENGTH_MM = Decimal("1080")
+
+ZONE_CATEGORY_MAPPING = {
+	"WALL": "duvar_paneli",
+	"BASE": "duz_taban_paneli",
+	"ROOF": "tavan_paneli",
+	"COVER": "kapakli_duvar_paneli",
+	"ACCESSORY": "aksesuar",
+}
 
 
 def _to_decimal(value):
@@ -42,31 +56,101 @@ def _is_steel_tank(value):
 	return tank_type in {"celik", "steel"}
 
 
-def _resolve_stock_for_line(line, material_code=None):
-	"""
-	BOM satırında belirtilen kalınlığa göre uygun StockCard'ı bulur.
-	Tercih sırası:
-	1. Material code ile match (varsa)
-	2. Kalınlığa göre (bom_thickness_mm)
-	3. is_passive false olanlar önce (aktif stoklar)
-	"""
-	if line.required_thickness is None:
+def _resolve_line_category(line, requested_category=None):
+	if requested_category:
+		return str(requested_category).strip().lower()
+
+	return ZONE_CATEGORY_MAPPING.get(line.zone_type)
+
+
+def _decompose_side_to_panel_counts(side_length):
+	full_count = int(side_length.to_integral_value(rounding=ROUND_FLOOR))
+	remainder = side_length - Decimal(full_count)
+	half_count = 0
+
+	if remainder >= Decimal("0.5"):
+		half_count = 1
+	elif remainder > Decimal("0"):
+		# 0.5 olmayan artık için eksik kalmaması adına bir tam panel eklenir.
+		full_count += 1
+
+	return full_count, half_count
+
+
+def _calculate_wall_panel_mix(width, length, multiplier):
+	full_w, half_w = _decompose_side_to_panel_counts(width)
+	full_l, half_l = _decompose_side_to_panel_counts(length)
+
+	full_panels = 2 * (full_w + full_l)
+	half_panels = 2 * (half_w + half_l)
+	total_panels = Decimal(full_panels + half_panels)
+	adjusted_total = total_panels
+
+	if multiplier > Decimal("1"):
+		adjusted_total = (total_panels * multiplier).to_integral_value(rounding=ROUND_CEILING)
+
+	extra_full_panels = int(adjusted_total - total_panels)
+	full_panels += max(extra_full_panels, 0)
+
+	return {
+		"full_panels": Decimal(full_panels),
+		"half_panels": Decimal(half_panels),
+	}
+
+
+def _resolve_stock_by_thickness_and_size(required_thickness, panel_type, material_code=None, category_code2=None):
+	if required_thickness is None:
 		return None
 
 	queryset = StockCard.objects.filter(
-		bom_thickness_mm=line.required_thickness,
+		bom_thickness_mm=required_thickness,
 	)
+
+	if panel_type == "FULL":
+		queryset = queryset.filter(
+			bom_width_mm=FULL_PANEL_WIDTH_MM,
+			bom_length_mm=FULL_PANEL_LENGTH_MM,
+		)
+	elif panel_type == "HALF":
+		queryset = queryset.filter(
+			Q(bom_width_mm=HALF_PANEL_WIDTH_MM, bom_length_mm=HALF_PANEL_LENGTH_MM)
+			| Q(bom_width_mm=HALF_PANEL_LENGTH_MM, bom_length_mm=HALF_PANEL_WIDTH_MM)
+		)
+
+	# if material_code:
+	# 	queryset = queryset.filter(
+	# 		Q(bom_category_code1__icontains=material_code)
+	# 		| Q(bom_category_code2__icontains=material_code)
+	# 		| Q(bom_category_code3__icontains=material_code)
+	# 		| Q(bom_category_code4__icontains=material_code)
+	# 	)
+
+	if category_code2:
+		queryset = queryset.filter(bom_category_code2__iexact=category_code2)
+
+	
+
+
+	stocks = list(queryset.order_by("is_passive", "stock_code"))
+	return stocks[0] if stocks else None
+
+
+def _resolve_stock_for_line(line, material_code=None, category_code2=None):
+	if line.required_thickness is None:
+		return None
+
+	queryset = StockCard.objects.filter(bom_thickness_mm=line.required_thickness)
 
 	if material_code:
 		queryset = queryset.filter(
-			bom_category_code1__icontains=material_code
-		) | queryset.filter(
-			bom_category_code2__icontains=material_code
-		) | queryset.filter(
-			bom_category_code3__icontains=material_code
-		) | queryset.filter(
-			bom_category_code4__icontains=material_code
+			Q(bom_category_code1__icontains=material_code)
+			| Q(bom_category_code2__icontains=material_code)
+			| Q(bom_category_code3__icontains=material_code)
+			| Q(bom_category_code4__icontains=material_code)
 		)
+
+	if category_code2:
+		queryset = queryset.filter(bom_category_code2__iexact=category_code2)
 
 	stocks = list(queryset.order_by("is_passive", "stock_code"))
 	return stocks[0] if stocks else None
@@ -371,7 +455,78 @@ class WarehouseRecipeCalculationView(APIView):
 		bom_lines = []
 
 		for line in selected_lines:
-			resolved_stock = _resolve_stock_for_line(line, material_code=material_code)
+			line_category = _resolve_line_category(line)
+
+			if line.zone_type == "WALL" and line.required_thickness is not None:
+				panel_mix = _calculate_wall_panel_mix(width, length, requirement_multiplier)
+				wall_parts = [
+					("FULL", panel_mix["full_panels"]),
+					("HALF", panel_mix["half_panels"]),
+				]
+
+				for panel_type, required_qty in wall_parts:
+					if required_qty <= 0:
+						continue
+
+					resolved_stock = _resolve_stock_by_thickness_and_size(
+						required_thickness=line.required_thickness,
+						panel_type=panel_type,
+						material_code=material_code,
+						category_code2=line_category,
+					)
+
+					stock_code = resolved_stock.stock_code if resolved_stock else None
+					available_qty = stock_map.get(stock_code) if stock_code else None
+					is_sufficient = None
+
+					if stock_code and available_qty is not None:
+						is_sufficient = available_qty >= required_qty
+						if not is_sufficient:
+							shortages.append(
+								{
+									"stock_code": stock_code,
+									"required_qty": float(required_qty),
+									"available_qty": float(available_qty),
+									"missing_qty": float((required_qty - available_qty).quantize(Decimal("0.001"))),
+									"unit": "adet",
+								}
+							)
+
+					if stock_code is None:
+						shortages.append(
+							{
+								"stock_code": None,
+								"required_qty": float(required_qty),
+								"available_qty": None,
+								"missing_qty": float(required_qty),
+								"unit": "adet",
+								"reason": f"{panel_type} panel icin uygun stok karti bulunamadi.",
+							}
+						)
+
+					bom_lines.append(
+						{
+							"zone_type": line.zone_type,
+							"layer_level": float(line.layer_level) if line.layer_level is not None else None,
+							"required_thickness": float(line.required_thickness),
+							"stock_category": line_category,
+							"panel_type": panel_type,
+							"required_qty": float(required_qty),
+							"unit": "adet",
+							"stock_code": stock_code,
+							"stock_name": resolved_stock.stock_name if resolved_stock else None,
+							"available_qty": float(available_qty) if available_qty is not None else None,
+							"is_sufficient": is_sufficient,
+						}
+					)
+
+				continue
+
+			resolved_stock = _resolve_stock_for_line(
+				line,
+				material_code=material_code,
+				category_code2=line_category,
+			)
 			required_area_m2 = _calculate_required_area_m2(line, width, length)
 			sheet_area_m2 = _stock_sheet_area_m2(resolved_stock)
 			required_piece_qty = _calculate_required_piece_qty(
@@ -430,6 +585,7 @@ class WarehouseRecipeCalculationView(APIView):
 					"zone_type": line.zone_type,
 					"layer_level": float(line.layer_level) if line.layer_level is not None else None,
 					"required_thickness": float(line.required_thickness) if line.required_thickness is not None else None,
+					"stock_category": line_category,
 					"base_required_qty": float(base_required_qty.quantize(Decimal("0.001"))),
 					"required_qty": float(required_qty.quantize(Decimal("0.001"))) if required_qty is not None else None,
 					"unit": unit,
