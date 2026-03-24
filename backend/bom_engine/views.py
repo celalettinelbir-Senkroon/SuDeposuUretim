@@ -14,6 +14,8 @@ FULL_PANEL_WIDTH_MM = Decimal("1080")
 FULL_PANEL_LENGTH_MM = Decimal("1080")
 HALF_PANEL_WIDTH_MM = Decimal("540")
 HALF_PANEL_LENGTH_MM = Decimal("1080")
+QUARTER_PANEL_WIDTH_MM = Decimal("540")
+QUARTER_PANEL_LENGTH_MM = Decimal("540")
 
 ZONE_CATEGORY_MAPPING = {
 	"WALL": "duvar_paneli",
@@ -77,24 +79,34 @@ def _decompose_side_to_panel_counts(side_length):
 	return full_count, half_count
 
 
-def _calculate_wall_panel_mix(width, length, multiplier):
+def _calculate_wall_panel_mix(width, length, layer_height, multiplier):
 	full_w, half_w = _decompose_side_to_panel_counts(width)
 	full_l, half_l = _decompose_side_to_panel_counts(length)
 
-	full_panels = 2 * (full_w + full_l)
-	half_panels = 2 * (half_w + half_l)
-	total_panels = Decimal(full_panels + half_panels)
+	primary_count = 2 * (full_w + full_l)
+	secondary_count = 2 * (half_w + half_l)
+
+	if layer_height <= Decimal("0.5"):
+		primary_type = "HORIZONTAL_HALF"
+		secondary_type = "QUARTER"
+	else:
+		primary_type = "FULL"
+		secondary_type = "VERTICAL_HALF"
+
+	total_panels = Decimal(primary_count + secondary_count)
 	adjusted_total = total_panels
 
 	if multiplier > Decimal("1"):
 		adjusted_total = (total_panels * multiplier).to_integral_value(rounding=ROUND_CEILING)
 
-	extra_full_panels = int(adjusted_total - total_panels)
-	full_panels += max(extra_full_panels, 0)
+	extra_primary_panels = int(adjusted_total - total_panels)
+	primary_count += max(extra_primary_panels, 0)
 
 	return {
-		"full_panels": Decimal(full_panels),
-		"half_panels": Decimal(half_panels),
+		"primary_type": primary_type,
+		"secondary_type": secondary_type,
+		"primary_qty": Decimal(primary_count),
+		"secondary_qty": Decimal(secondary_count),
 	}
 
 
@@ -111,10 +123,15 @@ def _resolve_stock_by_thickness_and_size(required_thickness, panel_type, materia
 			bom_width_mm=FULL_PANEL_WIDTH_MM,
 			bom_length_mm=FULL_PANEL_LENGTH_MM,
 		)
-	elif panel_type == "HALF":
+	elif panel_type in {"HALF", "VERTICAL_HALF", "HORIZONTAL_HALF"}:
 		queryset = queryset.filter(
 			Q(bom_width_mm=HALF_PANEL_WIDTH_MM, bom_length_mm=HALF_PANEL_LENGTH_MM)
 			| Q(bom_width_mm=HALF_PANEL_LENGTH_MM, bom_length_mm=HALF_PANEL_WIDTH_MM)
+		)
+	elif panel_type == "QUARTER":
+		queryset = queryset.filter(
+			bom_width_mm=QUARTER_PANEL_WIDTH_MM,
+			bom_length_mm=QUARTER_PANEL_LENGTH_MM,
 		)
 
 	# if material_code:
@@ -490,24 +507,38 @@ class WarehouseRecipeCalculationView(APIView):
 			}
 		)
 		first_wall_layer = wall_layer_levels[0] if wall_layer_levels else None
+		layer_height_map = {}
+		previous_level = Decimal("0")
+		for level in wall_layer_levels:
+			layer_height = level - previous_level
+			if layer_height <= 0:
+				layer_height = Decimal("0.5")
+			layer_height_map[level] = layer_height
+			previous_level = level
 
 		for line in selected_lines:
 			line_category = _resolve_line_category(line)
 
 			if line.zone_type == "WALL" and line.required_thickness is not None:
-				panel_mix = _calculate_wall_panel_mix(width, length, requirement_multiplier)
+				layer_height = layer_height_map.get(line.layer_level, Decimal("1"))
+				panel_mix = _calculate_wall_panel_mix(
+					width=width,
+					length=length,
+					layer_height=layer_height,
+					multiplier=requirement_multiplier,
+				)
 
 				# Ilk duvar katinda manhole girisi icin 1 panel dusulur.
 				is_first_wall_layer = first_wall_layer is not None and line.layer_level == first_wall_layer
 				if is_first_wall_layer:
-					if panel_mix["full_panels"] > 0:
-						panel_mix["full_panels"] -= Decimal("1")
-					elif panel_mix["half_panels"] > 0:
-						panel_mix["half_panels"] -= Decimal("1")
+					if panel_mix["primary_qty"] > 0:
+						panel_mix["primary_qty"] -= Decimal("1")
+					elif panel_mix["secondary_qty"] > 0:
+						panel_mix["secondary_qty"] -= Decimal("1")
 
 				wall_parts = [
-					("FULL", panel_mix["full_panels"]),
-					("HALF", panel_mix["half_panels"]),
+					(panel_mix["primary_type"], panel_mix["primary_qty"]),
+					(panel_mix["secondary_type"], panel_mix["secondary_qty"]),
 				]
 
 				for panel_type, required_qty in wall_parts:
