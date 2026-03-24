@@ -141,6 +141,31 @@ def _resolve_stock_for_line(line, material_code=None, category_code2=None):
 
 	queryset = StockCard.objects.filter(bom_thickness_mm=line.required_thickness)
 
+	# if material_code:
+	# 	queryset = queryset.filter(
+	# 		Q(bom_category_code1__icontains=material_code)
+	# 		| Q(bom_category_code2__icontains=material_code)
+	# 		| Q(bom_category_code3__icontains=material_code)
+	# 		| Q(bom_category_code4__icontains=material_code)
+	# 	)
+
+	
+ 
+	if category_code2:
+		queryset = queryset.filter(bom_category_code2__iexact=category_code2)
+
+	
+ 
+	stocks = list(queryset.order_by("is_passive", "stock_code"))
+	return stocks[0] if stocks else None
+
+
+def _resolve_manhole_stock(required_thickness=None, material_code=None):
+	queryset = StockCard.objects.all()
+
+	if required_thickness is not None:
+		queryset = queryset.filter(bom_thickness_mm=required_thickness)
+
 	if material_code:
 		queryset = queryset.filter(
 			Q(bom_category_code1__icontains=material_code)
@@ -149,8 +174,12 @@ def _resolve_stock_for_line(line, material_code=None, category_code2=None):
 			| Q(bom_category_code4__icontains=material_code)
 		)
 
-	if category_code2:
-		queryset = queryset.filter(bom_category_code2__iexact=category_code2)
+	cover_category = ZONE_CATEGORY_MAPPING.get("COVER")
+	queryset = queryset.filter(
+		Q(bom_category_code2__iexact=cover_category)
+		| Q(stock_name__icontains="manhole")
+		| Q(stock_name__icontains="kapak")
+	)
 
 	stocks = list(queryset.order_by("is_passive", "stock_code"))
 	return stocks[0] if stocks else None
@@ -453,12 +482,29 @@ class WarehouseRecipeCalculationView(APIView):
 
 		shortages = []
 		bom_lines = []
+		wall_layer_levels = sorted(
+			{
+				line.layer_level
+				for line in selected_lines
+				if line.zone_type == "WALL" and line.layer_level is not None
+			}
+		)
+		first_wall_layer = wall_layer_levels[0] if wall_layer_levels else None
 
 		for line in selected_lines:
 			line_category = _resolve_line_category(line)
 
 			if line.zone_type == "WALL" and line.required_thickness is not None:
 				panel_mix = _calculate_wall_panel_mix(width, length, requirement_multiplier)
+
+				# Ilk duvar katinda manhole girisi icin 1 panel dusulur.
+				is_first_wall_layer = first_wall_layer is not None and line.layer_level == first_wall_layer
+				if is_first_wall_layer:
+					if panel_mix["full_panels"] > 0:
+						panel_mix["full_panels"] -= Decimal("1")
+					elif panel_mix["half_panels"] > 0:
+						panel_mix["half_panels"] -= Decimal("1")
+
 				wall_parts = [
 					("FULL", panel_mix["full_panels"]),
 					("HALF", panel_mix["half_panels"]),
@@ -513,6 +559,7 @@ class WarehouseRecipeCalculationView(APIView):
 							"panel_type": panel_type,
 							"required_qty": float(required_qty),
 							"unit": "adet",
+							"manhole_deducted": is_first_wall_layer,
 							"stock_code": stock_code,
 							"stock_name": resolved_stock.stock_name if resolved_stock else None,
 							"available_qty": float(available_qty) if available_qty is not None else None,
@@ -527,16 +574,22 @@ class WarehouseRecipeCalculationView(APIView):
 				material_code=material_code,
 				category_code2=line_category,
 			)
-			required_area_m2 = _calculate_required_area_m2(line, width, length)
-			sheet_area_m2 = _stock_sheet_area_m2(resolved_stock)
-			required_piece_qty = _calculate_required_piece_qty(
-				required_area_m2=required_area_m2,
-				sheet_area_m2=sheet_area_m2,
-				multiplier=requirement_multiplier,
-			)
+			if line.zone_type in {"COVER", "ACCESSORY"}:
+				required_area_m2 = None
+				sheet_area_m2 = None
+				base_required_qty = Decimal("1")
+				required_qty = Decimal("1")
+			else:
+				required_area_m2 = _calculate_required_area_m2(line, width, length)
+				sheet_area_m2 = _stock_sheet_area_m2(resolved_stock)
+				required_piece_qty = _calculate_required_piece_qty(
+					required_area_m2=required_area_m2,
+					sheet_area_m2=sheet_area_m2,
+					multiplier=requirement_multiplier,
+				)
 
-			base_required_qty = required_area_m2.quantize(Decimal("0.001")) if required_area_m2 is not None else Decimal("1")
-			required_qty = required_piece_qty
+				base_required_qty = required_area_m2.quantize(Decimal("0.001")) if required_area_m2 is not None else Decimal("1")
+				required_qty = required_piece_qty
 
 			stock_code = resolved_stock.stock_code if resolved_stock else None
 			available_qty = stock_map.get(stock_code) if stock_code else None
