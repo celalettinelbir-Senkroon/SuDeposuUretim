@@ -16,6 +16,7 @@ HALF_PANEL_WIDTH_MM = Decimal("540")
 HALF_PANEL_LENGTH_MM = Decimal("1080")
 QUARTER_PANEL_WIDTH_MM = Decimal("540")
 QUARTER_PANEL_LENGTH_MM = Decimal("540")
+MODULE_MM = Decimal("1080")
 
 ZONE_CATEGORY_MAPPING = {
 	"WALL": "duvar_paneli",
@@ -77,6 +78,98 @@ def _decompose_side_to_panel_counts(side_length):
 		full_count += 1
 
 	return full_count, half_count
+
+
+def _fill_strip_greedy(strip_length):
+	remaining = strip_length
+	pieces = [Decimal("2.0"), Decimal("1.5"), Decimal("1.0"), Decimal("0.5")]
+	plan = {piece: 0 for piece in pieces}
+
+	for piece in pieces:
+		count = int((remaining / piece).to_integral_value(rounding=ROUND_FLOOR))
+		if count > 0:
+			plan[piece] += count
+			remaining -= piece * count
+
+	if remaining > Decimal("0"):
+		# Kalan 0.5 altı olsa bile alan açık kalmaması için en küçük panel eklenir.
+		plan[Decimal("0.5")] += 1
+
+	return plan
+
+
+def _calculate_surface_panel_plan(width, length, multiplier):
+	min_len = min(width, length)
+	max_len = max(width, length)
+
+	full_strips = int(min_len.to_integral_value(rounding=ROUND_FLOOR))
+	remainder = min_len - Decimal(full_strips)
+	half_strips = 1 if remainder > Decimal("0") else 0
+
+	base_strip_plan = _fill_strip_greedy(max_len)
+	surface_plan = {}
+
+	for panel_length, count in base_strip_plan.items():
+		if count > 0 and full_strips > 0:
+			surface_plan[(Decimal("1.0"), panel_length)] = count * full_strips
+
+	if half_strips > 0:
+		for panel_length, count in base_strip_plan.items():
+			if count > 0:
+				surface_plan[(Decimal("0.5"), panel_length)] = (
+					surface_plan.get((Decimal("0.5"), panel_length), 0) + count * half_strips
+				)
+
+	total_count = sum(surface_plan.values())
+	if multiplier > Decimal("1") and total_count > 0:
+		adjusted_total = int((Decimal(total_count) * multiplier).to_integral_value(rounding=ROUND_CEILING))
+		extra = adjusted_total - total_count
+		if extra > 0:
+			priority = [
+				(Decimal("1.0"), Decimal("2.0")),
+				(Decimal("0.5"), Decimal("2.0")),
+				(Decimal("1.0"), Decimal("1.5")),
+				(Decimal("0.5"), Decimal("1.5")),
+				(Decimal("1.0"), Decimal("1.0")),
+				(Decimal("0.5"), Decimal("1.0")),
+				(Decimal("1.0"), Decimal("0.5")),
+				(Decimal("0.5"), Decimal("0.5")),
+			]
+			for key in priority:
+				if key in surface_plan:
+					surface_plan[key] += extra
+					break
+
+	return surface_plan
+
+
+def _resolve_stock_by_nominal_size(required_thickness, category_code2, nominal_width_m, nominal_length_m, material_code=None):
+	if required_thickness is None:
+		return None
+
+	target_width_mm = nominal_width_m * MODULE_MM
+	target_length_mm = nominal_length_m * MODULE_MM
+
+	queryset = StockCard.objects.filter(
+		bom_thickness_mm=required_thickness,
+	).filter(
+		Q(bom_width_mm=target_width_mm, bom_length_mm=target_length_mm)
+		| Q(bom_width_mm=target_length_mm, bom_length_mm=target_width_mm)
+	)
+
+	if category_code2:
+		queryset = queryset.filter(bom_category_code2__iexact=category_code2)
+
+	# if material_code:
+	# 	queryset = queryset.filter(
+	# 		Q(bom_category_code1__icontains=material_code)
+	# 		| Q(bom_category_code2__icontains=material_code)
+	# 		| Q(bom_category_code3__icontains=material_code)
+	# 		| Q(bom_category_code4__icontains=material_code)
+	# 	)
+
+	stocks = list(queryset.order_by("is_passive", "stock_code"))
+	return stocks[0] if stocks else None
 
 
 def _calculate_wall_panel_mix(width, length, layer_height, multiplier):
@@ -518,6 +611,73 @@ class WarehouseRecipeCalculationView(APIView):
 
 		for line in selected_lines:
 			line_category = _resolve_line_category(line)
+
+			if line.zone_type in {"BASE", "ROOF"} and line.required_thickness is not None:
+				surface_plan = _calculate_surface_panel_plan(
+					width=width,
+					length=length,
+					multiplier=requirement_multiplier,
+				)
+
+				for (panel_width_m, panel_length_m), panel_count in surface_plan.items():
+					required_qty = Decimal(panel_count)
+					if required_qty <= 0:
+						continue
+
+					resolved_stock = _resolve_stock_by_nominal_size(
+						required_thickness=line.required_thickness,
+						category_code2=line_category,
+						nominal_width_m=panel_width_m,
+						nominal_length_m=panel_length_m,
+						material_code=material_code,
+					)
+
+					stock_code = resolved_stock.stock_code if resolved_stock else None
+					available_qty = stock_map.get(stock_code) if stock_code else None
+					is_sufficient = None
+
+					if stock_code and available_qty is not None:
+						is_sufficient = available_qty >= required_qty
+						if not is_sufficient:
+							shortages.append(
+								{
+									"stock_code": stock_code,
+									"required_qty": float(required_qty),
+									"available_qty": float(available_qty),
+									"missing_qty": float((required_qty - available_qty).quantize(Decimal("0.001"))),
+									"unit": "adet",
+								}
+							)
+
+					if stock_code is None:
+						shortages.append(
+							{
+								"stock_code": None,
+								"required_qty": float(required_qty),
+								"available_qty": None,
+								"missing_qty": float(required_qty),
+								"unit": "adet",
+								"reason": f"{line.zone_type} icin {panel_width_m}x{panel_length_m} panel stok karsiligi bulunamadi.",
+							}
+						)
+
+					bom_lines.append(
+						{
+							"zone_type": line.zone_type,
+							"layer_level": float(line.layer_level) if line.layer_level is not None else None,
+							"required_thickness": float(line.required_thickness),
+							"stock_category": line_category,
+							"panel_type": f"{panel_width_m}x{panel_length_m}",
+							"required_qty": float(required_qty),
+							"unit": "adet",
+							"stock_code": stock_code,
+							"stock_name": resolved_stock.stock_name if resolved_stock else None,
+							"available_qty": float(available_qty) if available_qty is not None else None,
+							"is_sufficient": is_sufficient,
+						}
+					)
+
+				continue
 
 			if line.zone_type == "WALL" and line.required_thickness is not None:
 				layer_height = layer_height_map.get(line.layer_level, Decimal("1"))
