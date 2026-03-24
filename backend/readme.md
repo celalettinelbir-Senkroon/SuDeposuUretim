@@ -11,6 +11,7 @@ python manage.py migrate_schemas
 
 python manage.py runserver
 
+
 # JWT login / refresh
 # POST /api/auth/login/  -> access + refresh token dondurur
 # POST /api/auth/refresh/ -> yeni access token dondurur
@@ -20,3 +21,19 @@ python manage.py runserver
 
 # Ekomaxi şeması için admin oluştur
 ./manage.py tenant_command loaddata --schema=customer1
+
+# Tenant için superuser oluştur (interaktif)
+python manage.py create_tenant_superuser --schema=customer1
+
+# Tenant için superuser oluştur (tek satır)
+python manage.py create_tenant_superuser --schema=customer1 --username=admin --email=admin@example.com
+
+
+Domain.objects.create(
+    domain='localhost',
+    tenant=public_tenant,
+    is_primary=True
+)
+
+
+

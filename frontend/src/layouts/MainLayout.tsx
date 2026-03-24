@@ -24,6 +24,7 @@ import PeopleAltIcon from '@mui/icons-material/PeopleAlt'
 import PrecisionManufacturingIcon from '@mui/icons-material/PrecisionManufacturing'
 import Inventory2Icon from '@mui/icons-material/Inventory2'
 import SettingsIcon from '@mui/icons-material/Settings'
+import QueryStatsIcon from '@mui/icons-material/QueryStats'
 import NotificationsNoneIcon from '@mui/icons-material/NotificationsNone'
 import MenuIcon from '@mui/icons-material/Menu'
 import DarkModeIcon from '@mui/icons-material/DarkMode'
@@ -69,6 +70,7 @@ function MainLayout({ mode, onToggleTheme, notificationCount = 7 }: MainLayoutPr
         icon: <PrecisionManufacturingIcon />,
       },
       { label: 'Stok Yonetimi', path: '/stok-yonetimi', icon: <Inventory2Icon /> },
+      { label: 'Maliyet Analiz', path: '/maliyet-analiz', icon: <QueryStatsIcon /> },
       { label: 'Ayarlar', path: '/ayarlar', icon: <SettingsIcon /> },
     ],
     []

@@ -62,6 +62,8 @@ SHARED_APPS = [
     'django.contrib.messages',
     'django.contrib.admin',
     'django.contrib.staticfiles',
+    'bom_engine',
+    'import_export'
 ]
 
 TENANT_APPS = [
@@ -151,3 +153,5 @@ SIMPLE_JWT = {
     'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
+
+LANGUAGE_CODE = 'tr'

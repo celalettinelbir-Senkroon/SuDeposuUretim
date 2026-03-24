@@ -1,0 +1,39 @@
+﻿from django.db import models
+
+class TankProject(models.Model):
+    """Kullanıcının girdiği ana depo parametrelerini tutar."""
+    customer_name = models.CharField(max_length=200, null=True, blank=True)
+    
+    # Kullanıcı Girdileri
+    width_m = models.DecimalField(max_digits=6, decimal_places=2, verbose_name="En (Metre)")
+    length_m = models.DecimalField(max_digits=6, decimal_places=2, verbose_name="Boy (Metre)")
+    height_m = models.DecimalField(max_digits=6, decimal_places=2, verbose_name="Yükseklik (Metre)")
+    
+    material_type = models.CharField(max_length=100, help_text="Örn: AISI304, AISI316, Galvaniz")
+    
+    # Maliyet Özeti
+    total_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Proje: {self.width_m}x{self.length_m}x{self.height_m} - {self.material_type}"
+
+class TankProjectLine(models.Model):
+    """Hesaplama motorunun bulduğu stok kartlarını ve maliyetlerini tutar (Dinamik BOM)."""
+    project = models.ForeignKey(TankProject, on_delete=models.CASCADE, related_name='calculated_lines')
+    
+    # Bulunan Stok Kartı
+    stock_card = models.ForeignKey('StockCard', on_delete=models.PROTECT)
+    
+    # Hesaplanan Miktar ve Nereye Ait Olduğu
+    zone_type = models.CharField(max_length=20, choices=[('WALL', 'Duvar'), ('ROOF', 'Tavan'), ('BASE', 'Taban')])
+    layer_level = models.DecimalField(max_digits=4, decimal_places=1, null=True, blank=True, verbose_name="Katman")
+    quantity = models.IntegerField(verbose_name="Hesaplanan Adet")
+    
+    # Maliyet
+    unit_cost = models.DecimalField(max_digits=10, decimal_places=2)
+    line_total_cost = models.DecimalField(max_digits=12, decimal_places=2)
+
+    def save(self, *args, **kwargs):
+        self.line_total_cost = self.quantity * self.unit_cost
+        super().save(*args, **kwargs)

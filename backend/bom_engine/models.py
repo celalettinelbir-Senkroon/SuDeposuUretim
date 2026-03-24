@@ -31,27 +31,14 @@ class StockCard(models.Model):
     # Mikro Base Fields
     stock_guid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     stock_code = models.CharField(max_length=100, primary_key=True, verbose_name="Stock Code")
+    stock_code_1 = models.CharField(max_length=100, verbose_name="Stock Code 1", blank=True, null=True)
+    
     stock_name = models.CharField(max_length=255, verbose_name="Stock Name")
     unit_name = models.CharField(max_length=20, default="Piece", verbose_name="Unit Name")
     
     # Engineering / BOM Parameters (To be fed from Mikro Special fields)
-    bom_category = models.CharField(
-        max_length=100, 
-        null=True, 
-        blank=True, 
-        db_index=True, 
-        verbose_name="BOM Category",
-        help_text="Wall Panel, Base Sheet, Bolt, Gasket, etc."
-    )
-    bom_material = models.CharField(
-        max_length=50, 
-        choices=MATERIAL_CHOICES, # Make sure MATERIAL_CHOICES is defined above or imported
-        null=True, 
-        blank=True,
-        verbose_name="BOM Material"
-    )
     bom_thickness_mm = models.DecimalField(
-        max_digits=5, 
+        max_digits=8, 
         decimal_places=2, 
         null=True, 
         blank=True,
@@ -59,7 +46,7 @@ class StockCard(models.Model):
     )
     
     bom_width_mm = models.DecimalField(
-        max_digits=5,
+        max_digits=8,
         decimal_places=2,
         null=True,
         blank=True,
@@ -67,23 +54,17 @@ class StockCard(models.Model):
     )
     
     bom_length_mm = models.DecimalField(
-        max_digits=5,
+        max_digits=8,
         decimal_places=2,
         null=True,
         blank=True,
         verbose_name="BOM Length (mm)",
     )
-    
-    bom_dimensions = models.CharField(
-        max_length=50, 
-        null=True, 
-        blank=True, 
-        verbose_name="BOM Dimensions",
-        help_text="E.g.: 1x1, 0.5x1, 1x2"
-    )
-    product_type_code1 = models.CharField(max_length=50, blank=True, null=True, verbose_name="Product Type Code 1")
-    product_type_code2 = models.CharField(max_length=50, blank=True, null=True, verbose_name="Product Type Code 2")
-    product_type_code3 = models.CharField(max_length=50, blank=True, null=True, verbose_name="Product Type Code 3")
+    bom_category_code1 = models.CharField(max_length=50, blank=True, null=True, verbose_name="BOM Category Code 1")
+    bom_category_code2 = models.CharField(max_length=50, blank=True, null=True, verbose_name="BOM Category Code 2")
+    bom_category_code3 = models.CharField(max_length=50, blank=True, null=True, verbose_name="BOM Category Code 3")
+    bom_category_code4 = models.CharField(max_length=50, blank=True, null=True, verbose_name="BOM Category Code 4")
+    price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Price")
     is_passive = models.BooleanField(default=True, verbose_name="Is Passive?")
 
     class Meta:
@@ -93,6 +74,26 @@ class StockCard(models.Model):
     def __str__(self):
         return f"{self.stock_code} | {self.stock_name}"
 
+
+class VariantMapping(models.Model):
+    """
+    Hesaplama motoru çalıştığında, istenen kalınlık, ebat ve malzemeye göre
+    Mikro'daki HANGİ stok kartının kullanılacağını bulan köprü tablodur.
+    """
+    produced_stock = models.ForeignKey(StockCard, on_delete=models.CASCADE, related_name='variants', verbose_name="Üretilecek Nihai Stok")
+    
+    # Arama Kriterleri
+    material_type = models.CharField(max_length=100, choices=MATERIAL_CHOICES, db_index=True, verbose_name="Malzeme Tipi")
+    # thickness = models.DecimalField(max_digits=5, decimal_places=2, db_index=True, verbose_name="Kalınlık (mm)")
+    description = models.CharField(max_length=255, null=True, blank=True, help_text="Örn: Yarım Panel 0.54x1.08", verbose_name="Açıklama / Ebat (Kritik!)")
+
+    class Meta:
+        verbose_name = "2. Variant Mapping"
+        verbose_name_plural = "2. Variant Mappings"
+        # Aynı malzeme, kalınlık ve ebat tanımından sadece 1 stok çıkmasını garanti eder (Tekil Çözünürlük)
+
+    def __str__(self):
+        return f"{self.material_type} - {self.thickness}mm ({self.description}) -> {self.produced_stock.stock_code}"
 
 
 
@@ -156,40 +157,32 @@ class ReferenceBomHeader(models.Model):
 
 
 class ReferenceBomLine(models.Model):
-    """
-    Step 2: The detailed layer-by-layer stock definitions.
-    Represents each cell in the thickness/height matrix.
-    """
     ZONE_CHOICES = [
         ('WALL', 'Side Wall Panel'),
         ('BASE', 'Base Panel'),
         ('ROOF', 'Roof Panel'),
         ('COVER', 'Manhole / Cleaning Cover'),
+        ('ACCESSORY', 'Aksesuarlar (Merdiven vb.)')
     ]
 
     bom_header = models.ForeignKey(ReferenceBomHeader, on_delete=models.CASCADE, related_name='lines')
-    
-    # COLUMN: Total height of the tank (e.g., 3.5 for a 3.5-module high tank)
     total_module_height = models.DecimalField(max_digits=4, decimal_places=1, verbose_name="Total Tank Height")
-    
-    # ROW: Which part of the tank is this for?
     zone_type = models.CharField(max_length=20, choices=ZONE_CHOICES)
+    layer_level = models.DecimalField(max_digits=4, decimal_places=1, null=True, blank=True)
     
-    # ROW DETAIL: If the zone is 'WALL', which specific layer from the bottom? (e.g., 1st layer, 2nd layer)
-    layer_level = models.DecimalField(max_digits=4, decimal_places=1, null=True, blank=True, 
-                                      help_text="Layer number from bottom to top (Applicable for WALLs)")
-    
-    # Direct link to the Stock/Item Master (Thickness and dimensions are inherited from here)
-    stock_card = models.ForeignKey('StockCard', on_delete=models.PROTECT, verbose_name="Selected Stock")
+    # HİBRİT YAPI KORUNDU
+    required_thickness = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, verbose_name="Gereken Kalınlık (Paneller İçin)")
+    stock_card = models.ForeignKey(StockCard, on_delete=models.PROTECT, null=True, blank=True, verbose_name="Doğrudan Stok Seçimi (Aksesuarlar İçin)")
 
     class Meta:
-        verbose_name = "3. Reference BOM Line"
-        verbose_name_plural = "3. Reference BOM Lines"
+        verbose_name = "5. Reference BOM Line"
+        verbose_name_plural = "5. Reference BOM Lines"
         ordering = ['total_module_height', 'zone_type', 'layer_level']
 
     def __str__(self):
         layer_info = f"Layer {self.layer_level}" if self.layer_level else "Standard"
-        return f"Height: {self.total_module_height} -> {self.get_zone_type_display()} ({layer_info}) : {self.stock_card.sto_kod}"
-    
+        val = f"{self.required_thickness}mm" if self.required_thickness else self.stock_card.stock_code
+        return f"Height: {self.total_module_height} -> {self.get_zone_type_display()} ({layer_info}) : {val}"
+
 
 

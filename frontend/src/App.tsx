@@ -7,7 +7,7 @@ import { TenantProvider, useTenantContext } from './context/TenantContext.tsx'
 import MainLayout from './layouts/MainLayout.tsx'
 import Login from './pages/Login.tsx'
 import { createAppTheme, type TenantThemeConfig } from './theme.ts'
-
+import MaliyetAnalizCard from './components/MaliyetAnalizCard.tsx'
 type ColorMode = 'light' | 'dark'
 
 type PageCardProps = {
@@ -25,6 +25,8 @@ function PageCard({ title, description }: PageCardProps) {
     </Paper>
   )
 }
+
+
 
 function DashboardPage() {
   return (
@@ -111,6 +113,7 @@ function AppShell() {
               <Route path="uretim-modulu" element={<UretimModuluPage />} />
               <Route path="stok-yonetimi" element={<StokYonetimiPage />} />
               <Route path="ayarlar" element={<AyarlarPage />} />
+              <Route path="maliyet-analiz" element={<MaliyetAnalizCard />} />
             </Route>
           </Route>
 
