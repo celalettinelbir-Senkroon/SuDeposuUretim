@@ -111,7 +111,17 @@ function MaliyetAnalizCard() {
 
   return (
     <Paper sx={{ p: 3 }}>
-      <Card sx={{ mb: 3, bgcolor: '#f8f9fa' }}>
+      <Card
+        sx={{
+          mb: 3,
+          bgcolor: (theme) =>
+            theme.palette.mode === 'dark' ? 'rgba(148, 163, 184, 0.10)' : '#f8f9fa',
+          border: (theme) =>
+            theme.palette.mode === 'dark'
+              ? '1px solid rgba(148, 163, 184, 0.24)'
+              : '1px solid rgba(15, 23, 42, 0.08)',
+        }}
+      >
         <CardContent>
           <Typography variant="h6" sx={{ mb: 2 }}>
             Depo Boyutları (Metre)
@@ -217,15 +227,20 @@ function MaliyetAnalizCard() {
           <TableContainer>
             <Table size="small">
               <TableHead>
-                <TableRow sx={{ bgcolor: 'grey.100' }}>
-                  <TableCell><strong>Bölge</strong></TableCell>
-                  <TableCell align="center"><strong>Katman</strong></TableCell>
-                  <TableCell align="center"><strong>Kalınlık</strong></TableCell>
-                  <TableCell align="center"><strong>Gerekli Miktar</strong></TableCell>
-                  <TableCell align="center"><strong>Birim</strong></TableCell>
-                  <TableCell><strong>Stok Kodu</strong></TableCell>
-                  <TableCell><strong>Stok Adı</strong></TableCell>
-                  <TableCell align="center"><strong>Durum</strong></TableCell>
+                <TableRow
+                  sx={{
+                    bgcolor: (theme) =>
+                      theme.palette.mode === 'dark' ? 'rgba(30, 41, 59, 0.9)' : 'grey.100',
+                  }}
+                >
+                  <TableCell sx={{ color: 'text.primary' }}><strong>Bölge</strong></TableCell>
+                  <TableCell align="center" sx={{ color: 'text.primary' }}><strong>Katman</strong></TableCell>
+                  <TableCell align="center" sx={{ color: 'text.primary' }}><strong>Kalınlık</strong></TableCell>
+                  <TableCell align="center" sx={{ color: 'text.primary' }}><strong>Gerekli Miktar</strong></TableCell>
+                  <TableCell align="center" sx={{ color: 'text.primary' }}><strong>Birim</strong></TableCell>
+                  <TableCell sx={{ color: 'text.primary' }}><strong>Stok Kodu</strong></TableCell>
+                  <TableCell sx={{ color: 'text.primary' }}><strong>Stok Adı</strong></TableCell>
+                  <TableCell align="center" sx={{ color: 'text.primary' }}><strong>Durum</strong></TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>

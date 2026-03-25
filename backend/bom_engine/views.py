@@ -34,6 +34,21 @@ def _to_decimal(value):
 		return None
 
 
+def _get_panel_type_name(panel_width_m, panel_length_m):
+	"""Nominal dimensions'tan panel türü adı döndür"""
+	w = panel_width_m
+	l = panel_length_m
+	
+	if w == Decimal("1.0") and l == Decimal("1.0"):
+		return "FULL"
+	elif (w == Decimal("0.5") and l == Decimal("1.0")) or (w == Decimal("1.0") and l == Decimal("0.5")):
+		return "HALF"
+	elif w == Decimal("0.5") and l == Decimal("0.5"):
+		return "QUARTER"
+	else:
+		return f"CUSTOM_{w}x{l}"
+
+
 def _resolve_material_code(value):
 	if not value:
 		return None
@@ -116,8 +131,14 @@ def _calculate_surface_panel_plan(width, length, multiplier):
 	if half_strips > 0:
 		for panel_length, count in base_strip_plan.items():
 			if count > 0:
-				surface_plan[(Decimal("0.5"), panel_length)] = (
-					surface_plan.get((Decimal("0.5"), panel_length), 0) + count * half_strips
+				# Eğer panel_length 0.5'ten küçük veya eşitse, 0.5x0.5 yerine 0.5x1.0 kullan
+				if panel_length <= Decimal("0.5"):
+					effective_length = Decimal("1.0")
+				else:
+					effective_length = panel_length
+				
+				surface_plan[(Decimal("0.5"), effective_length)] = (
+					surface_plan.get((Decimal("0.5"), effective_length), 0) + count * half_strips
 				)
 
 	total_count = sum(surface_plan.values())
@@ -150,26 +171,53 @@ def _resolve_stock_by_nominal_size(required_thickness, category_code2, nominal_w
 	target_width_mm = nominal_width_m * MODULE_MM
 	target_length_mm = nominal_length_m * MODULE_MM
 
-	queryset = StockCard.objects.filter(
-		bom_thickness_mm=required_thickness,
-	).filter(
+	# Çift yönlü eşleştirme: (w, l) veya (l, w)
+	dimension_filter = (
 		Q(bom_width_mm=target_width_mm, bom_length_mm=target_length_mm)
 		| Q(bom_width_mm=target_length_mm, bom_length_mm=target_width_mm)
 	)
 
+	queryset = StockCard.objects.filter(
+		bom_thickness_mm=required_thickness,
+	).filter(dimension_filter)
+
 	if category_code2:
 		queryset = queryset.filter(bom_category_code2__iexact=category_code2)
 
-	# if material_code:
-	# 	queryset = queryset.filter(
-	# 		Q(bom_category_code1__icontains=material_code)
-	# 		| Q(bom_category_code2__icontains=material_code)
-	# 		| Q(bom_category_code3__icontains=material_code)
-	# 		| Q(bom_category_code4__icontains=material_code)
-	# 	)
-
 	stocks = list(queryset.order_by("is_passive", "stock_code"))
-	return stocks[0] if stocks else None
+	if stocks:
+		return stocks[0]
+
+	# Fallback temel panel türlerine göre arama (iki tarafı da yarIMlı durum için)
+	if nominal_width_m == Decimal("0.5") and nominal_length_m == Decimal("0.5"):
+		# QUARTER panel olarak ara
+		queryset = StockCard.objects.filter(
+			bom_thickness_mm=required_thickness,
+			bom_width_mm=QUARTER_PANEL_WIDTH_MM,
+			bom_length_mm=QUARTER_PANEL_LENGTH_MM,
+		)
+		if category_code2:
+			queryset = queryset.filter(bom_category_code2__iexact=category_code2)
+		stocks = list(queryset.order_by("is_passive", "stock_code"))
+		if stocks:
+			return stocks[0]
+
+	# Eğer hala bulunamadığı durum, en küçükten başlayarak alternatif panelleri ara
+	if nominal_width_m == Decimal("0.5") or nominal_length_m == Decimal("0.5"):
+		# 0.5 boyutlu panelleri ara (HALF panellerini denetle)
+		queryset = StockCard.objects.filter(
+			bom_thickness_mm=required_thickness,
+		).filter(
+			Q(bom_width_mm=HALF_PANEL_WIDTH_MM, bom_length_mm=HALF_PANEL_LENGTH_MM)
+			| Q(bom_width_mm=HALF_PANEL_LENGTH_MM, bom_length_mm=HALF_PANEL_WIDTH_MM)
+		)
+		if category_code2:
+			queryset = queryset.filter(bom_category_code2__iexact=category_code2)
+		stocks = list(queryset.order_by("is_passive", "stock_code"))
+		if stocks:
+			return stocks[0]
+
+	return None
 
 
 def _calculate_wall_panel_mix(width, length, layer_height, multiplier):
@@ -635,6 +683,7 @@ class WarehouseRecipeCalculationView(APIView):
 					stock_code = resolved_stock.stock_code if resolved_stock else None
 					available_qty = stock_map.get(stock_code) if stock_code else None
 					is_sufficient = None
+					panel_type_name = _get_panel_type_name(panel_width_m, panel_length_m)
 
 					if stock_code and available_qty is not None:
 						is_sufficient = available_qty >= required_qty
@@ -657,7 +706,7 @@ class WarehouseRecipeCalculationView(APIView):
 								"available_qty": None,
 								"missing_qty": float(required_qty),
 								"unit": "adet",
-								"reason": f"{line.zone_type} icin {panel_width_m}x{panel_length_m} panel stok karsiligi bulunamadi.",
+								"reason": f"{line.zone_type} icin {panel_width_m}x{panel_length_m}m ({panel_type_name}) panel stok karsiligi bulunamadi.",
 							}
 						)
 
@@ -668,6 +717,7 @@ class WarehouseRecipeCalculationView(APIView):
 							"required_thickness": float(line.required_thickness),
 							"stock_category": line_category,
 							"panel_type": f"{panel_width_m}x{panel_length_m}",
+							"panel_type_name": panel_type_name,
 							"required_qty": float(required_qty),
 							"unit": "adet",
 							"stock_code": stock_code,
