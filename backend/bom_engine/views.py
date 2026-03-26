@@ -956,6 +956,9 @@ class WarehouseRecipeCalculationView(APIView):
 
 				continue
 
+
+
+
 			resolved_stock = _resolve_stock_for_line(
 				line,
 				material_code=material_code,
@@ -1037,6 +1040,21 @@ class WarehouseRecipeCalculationView(APIView):
 				}
 			)
 
+
+
+
+		# Aksesuar ve Merdivenler: Height'e göre otomatik seçim ve BOM'a ekleme
+		# Tüm aksesuar stoklarını (Dış Merdiven, İç Merdiven, Pabuç vb.) çek
+		
+		# İç merdiven türünü malzeme tipinden belirle (depo materyaline göre Çelik/GRP)
+		
+		# Height'e göre uygun merdivenler ve aksesuarları BOM'a ekle
+		bom_lines = _add_ladders_to_bom(
+			tank_height_m=float(height),
+			bom_lines=bom_lines,
+			inner_ladder_type="Çelik", # ileride grp ve çelik seçtireceğim.
+		)
+
 		payload["matched_header"] = {
 			"id": header.id,
 			"material_type": header.material_type,
@@ -1053,3 +1071,56 @@ class WarehouseRecipeCalculationView(APIView):
 		}
 
 		return JsonResponse(payload, status=200)
+
+
+def _add_ladders_to_bom(tank_height_m, bom_lines, inner_ladder_type="Çelik"):
+    """
+    Sadece Dış ve İç merdiveni hesaplayıp BOM listesine ekler.
+    Aksesuarlar (Pabuç, Kulak vb.) hariç tutulmuştur.
+    """
+    tank_height_mm = tank_height_m * 1000
+    
+    # İç merdiven materyali (bom_category_code4)
+    inner_ladder_cat4 = "Çelik Yarımamul" if inner_ladder_type == "Çelik" else "Grp Yarımamul"
+    
+    # 1. DIŞ MERDİVEN SEÇİMİ
+    # 'Ortak Yarımamul' olan, boyu >= depo boyu olanların en KISASI
+    selected_outer_ladder = StockCard.objects.filter(
+        bom_category_code3='Merdiven',
+        bom_category_code4='Ortak Yarımamul',
+        bom_length_mm__gte=tank_height_mm
+    ).order_by('bom_length_mm').first()
+
+    # 2. İÇ MERDİVEN SEÇİMİ
+    # Materyale uyan, boyu <= depo boyu olanların en UZUNU
+    selected_inner_ladder = StockCard.objects.filter(
+        bom_category_code3='Merdiven',
+        bom_category_code4=inner_ladder_cat4,
+        bom_length_mm__lte=tank_height_mm,
+        bom_length_mm__gt=0  # Uzunluğu 0 olan aksesuarlar yanlışlıkla gelmesin diye güvence
+    ).order_by('-bom_length_mm').first()
+
+    # Sadece seçilen merdivenleri listeye ekle
+    items_to_add = []
+    
+    if selected_outer_ladder:
+        items_to_add.append(selected_outer_ladder)
+    if selected_inner_ladder:
+        items_to_add.append(selected_inner_ladder)
+
+    # BOM (Ürün Ağacı) Çıktısını Oluştur
+    for item in items_to_add:
+        bom_lines.append({
+            "zone_type": "ACCESSORY",
+            "layer_level": None,
+            "required_thickness": None,
+            "stock_category": item.bom_category_code2,
+            "required_qty": float(1.0),
+            "unit": item.unit_name or "Adet",
+            "stock_code": item.stock_code,
+            "stock_name": item.stock_name,
+            "available_qty": None,
+            "is_sufficient": None,
+        })
+
+    return bom_lines

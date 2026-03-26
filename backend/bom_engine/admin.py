@@ -45,7 +45,9 @@ class StockCardResource(resources.ModelResource):
     
     # YENİ EKLENEN ALAN: Sütun adını kendi Excel'ine göre güncelle!
     bom_category_code2 = fields.Field(column_name='BOM Kategori Kodu 2', attribute='bom_category_code2')
-    
+    bom_category_code3 = fields.Field(column_name='BOM Kategori Kodu 3', attribute='bom_category_code3')
+    bom_category_code4 = fields.Field(column_name='BOM Kategori Kodu 4', attribute='bom_category_code4')
+
     is_passive = fields.Field(column_name='Pasif mi?', attribute='is_passive')
     
     class Meta:
