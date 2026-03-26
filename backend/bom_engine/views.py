@@ -95,51 +95,46 @@ def _decompose_side_to_panel_counts(side_length):
 	return full_count, half_count
 
 
-def _fill_strip_greedy(strip_length):
-	remaining = strip_length
-	pieces = [Decimal("2.0"), Decimal("1.5"), Decimal("1.0"), Decimal("0.5")]
-	plan = {piece: 0 for piece in pieces}
-
-	for piece in pieces:
-		count = int((remaining / piece).to_integral_value(rounding=ROUND_FLOOR))
-		if count > 0:
-			plan[piece] += count
-			remaining -= piece * count
-
-	if remaining > Decimal("0"):
-		# Kalan 0.5 altı olsa bile alan açık kalmaması için en küçük panel eklenir.
-		plan[Decimal("0.5")] += 1
-
-	return plan
-
-
 def _calculate_surface_panel_plan(width, length, multiplier):
-	min_len = min(width, length)
-	max_len = max(width, length)
+	short_edge = min(width, length)
+	long_edge = max(width, length)
 
-	full_strips = int(min_len.to_integral_value(rounding=ROUND_FLOOR))
-	remainder = min_len - Decimal(full_strips)
-	half_strips = 1 if remainder > Decimal("0") else 0
+	full_rows = int(short_edge.to_integral_value(rounding=ROUND_FLOOR))
+	has_half_strip = (short_edge % Decimal("1")) > Decimal("0")
 
-	base_strip_plan = _fill_strip_greedy(max_len)
+	long_double_count = int((long_edge / Decimal("2")).to_integral_value(rounding=ROUND_FLOOR))
+	long_remainder = long_edge % Decimal("2")
+
 	surface_plan = {}
 
-	for panel_length, count in base_strip_plan.items():
-		if count > 0 and full_strips > 0:
-			surface_plan[(Decimal("1.0"), panel_length)] = count * full_strips
+	def _add_panel(panel_width_m, panel_length_m, qty):
+		if qty <= 0:
+			return
+		key = (panel_width_m, panel_length_m)
+		surface_plan[key] = surface_plan.get(key, 0) + int(qty)
 
-	if half_strips > 0:
-		for panel_length, count in base_strip_plan.items():
-			if count > 0:
-				# Eğer panel_length 0.5'ten küçük veya eşitse, 0.5x0.5 yerine 0.5x1.0 kullan
-				if panel_length <= Decimal("0.5"):
-					effective_length = Decimal("1.0")
-				else:
-					effective_length = panel_length
-				
-				surface_plan[(Decimal("0.5"), effective_length)] = (
-					surface_plan.get((Decimal("0.5"), effective_length), 0) + count * half_strips
-				)
+	# Bolum 2: Ana govde (1m satirlar)
+	_add_panel(Decimal("1.0"), Decimal("2.0"), full_rows * long_double_count)
+
+	if long_remainder == Decimal("1.5"):
+		_add_panel(Decimal("1.0"), Decimal("1.5"), full_rows)
+	elif long_remainder == Decimal("1.0"):
+		_add_panel(Decimal("1.0"), Decimal("2.0"), full_rows // 2)
+		_add_panel(Decimal("1.0"), Decimal("1.0"), full_rows % 2)
+	elif long_remainder == Decimal("0.5"):
+		_add_panel(Decimal("0.5"), Decimal("2.0"), full_rows // 2)
+		_add_panel(Decimal("0.5"), Decimal("1.0"), full_rows % 2)
+
+	# Bolum 3: Ince serit (0.5m satir)
+	if has_half_strip:
+		_add_panel(Decimal("0.5"), Decimal("2.0"), long_double_count)
+
+		if long_remainder == Decimal("1.5"):
+			_add_panel(Decimal("0.5"), Decimal("1.5"), 1)
+		elif long_remainder == Decimal("1.0"):
+			_add_panel(Decimal("0.5"), Decimal("1.0"), 1)
+		elif long_remainder == Decimal("0.5"):
+			_add_panel(Decimal("0.5"), Decimal("0.5"), 1)
 
 	total_count = sum(surface_plan.values())
 	if multiplier > Decimal("1") and total_count > 0:
@@ -161,7 +156,8 @@ def _calculate_surface_panel_plan(width, length, multiplier):
 					surface_plan[key] += extra
 					break
 
-	return surface_plan
+	# Bolum 4: Sadece adet > 0 olan tipleri dondur.
+	return {key: qty for key, qty in surface_plan.items() if qty > 0}
 
 
 def _resolve_stock_by_nominal_size(required_thickness, category_code2, nominal_width_m, nominal_length_m, material_code=None):
