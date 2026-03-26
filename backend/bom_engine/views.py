@@ -24,6 +24,8 @@ ZONE_CATEGORY_MAPPING = {
 	"ROOF": "tavan_paneli",
 	"COVER": "kapakli_duvar_paneli",
 	"ACCESSORY": "aksesuar",
+	"EXTERNAL_ANGLE": "dis_kosebent",
+	"INTERNAL_TIE": "ic_gergi",
 }
 
 
@@ -803,6 +805,154 @@ class WarehouseRecipeCalculationView(APIView):
 							"is_sufficient": is_sufficient,
 						}
 					)
+
+				continue
+			#burada eğer köşebent bombeliyse gibi bir dallanma eklenmeli
+			if line.zone_type == "EXTERNAL_ANGLE" and line.required_thickness is not None:
+				# Dış Köşebent - Deponun 4 köşesine atılır.
+				required_qty = Decimal("4")
+				resolved_stocks = []
+
+				# Kalınlık BOM'dan (line.required_thickness) gelir.
+				# Köşebentin boyu deponun maksimum yüksekliği (height) olmalıdır.
+				resolved_stock = _resolve_stock_by_nominal_size(
+					required_thickness=line.required_thickness,
+					category_code2=line_category,
+					nominal_width_m=Decimal(),  # Köşebentin uzunluğu = Depo yüksekliği (Örn: 2.16)
+					nominal_length_m=height,  # Kendi veritabanı standartlarına göre ayarlayabilirsin
+					material_code=material_code,
+				)
+
+				if resolved_stock:
+					resolved_stocks.append((resolved_stock, required_qty))
+				else:
+					# Belirtilen ebatta bulunamazsa fallback olarak genel arama
+					fallback_stock = _resolve_stock_for_line(
+						line,
+						material_code=material_code,
+						category_code2=line_category,
+					)
+					if fallback_stock:
+						resolved_stocks.append((fallback_stock, required_qty))
+
+				# Her bir stok türü için eksik/yeterli kontrolü yap
+				unit = "adet"
+				
+				# Eğer resolved_stocks boşsa (stok hiç bulunamadıysa) döngüye girmeden hata basmak için:
+				if not resolved_stocks:
+					shortages.append(
+						{
+							"stock_code": None,
+							"required_qty": float(required_qty),
+							"available_qty": None,
+							"missing_qty": float(required_qty),
+							"unit": unit,
+							"reason": f"Dış Köşebent (Kalınlık: {line.required_thickness}mm, Boy: {height}m) için uygun stok kartı bulunamadı.",
+						}
+					)
+					
+				for stock_obj, qty in resolved_stocks:
+					stock_code = stock_obj.stock_code if stock_obj else None
+					available_qty = stock_map.get(stock_code) if stock_code else None
+					is_sufficient = None
+
+					if stock_code and available_qty is not None:
+						is_sufficient = available_qty >= qty
+						if not is_sufficient:
+							shortages.append(
+								{
+									"stock_code": stock_code,
+									"required_qty": float(qty),
+									"available_qty": float(available_qty),
+									"missing_qty": float((qty - available_qty).quantize(Decimal("0.001"))),
+									"unit": unit,
+								}
+							)
+					elif stock_code and available_qty is None:
+						# Stok kartı var ama envanterde miktar bilgisi yoksa
+						shortages.append(
+							{
+								"stock_code": stock_code,
+								"required_qty": float(qty),
+								"available_qty": 0.0,
+								"missing_qty": float(qty),
+								"unit": unit,
+								"reason": "Stok bakiyesi bulunamadı."
+							}
+						)
+
+					bom_lines.append(
+						{
+							"zone_type": line.zone_type,
+							"layer_level": float(line.layer_level) if line.layer_level is not None else None,
+							"required_thickness": float(line.required_thickness),
+							"stock_category": line_category,
+							"required_qty": float(qty),
+							"unit": unit,
+							"stock_code": stock_code,
+							"stock_name": stock_obj.stock_name if stock_obj else None,
+							"available_qty": float(available_qty) if available_qty is not None else None,
+							"is_sufficient": is_sufficient,
+						}
+					)
+
+				continue
+			if line.zone_type == "INTERNAL_TIE" and line.required_thickness is not None:
+				# İç Gergi - Height'a bağlı hesaplama
+				required_qty = (height / WALL_MODULE_HEIGHT_M).to_integral_value(rounding=ROUND_CEILING)
+				required_qty = required_qty * requirement_multiplier
+
+				# Kalınlıktan stok eşleştirmesi yap
+				resolved_stock = _resolve_stock_for_line(
+					line,
+					material_code=material_code,
+					category_code2=line_category,
+				)
+
+				stock_code = resolved_stock.stock_code if resolved_stock else None
+				available_qty = stock_map.get(stock_code) if stock_code else None
+				is_sufficient = None
+				unit = "adet"
+
+				if stock_code and available_qty is not None:
+					is_sufficient = available_qty >= required_qty
+					if not is_sufficient:
+						shortages.append(
+							{
+								"stock_code": stock_code,
+								"required_qty": float(required_qty.quantize(Decimal("0.001"))),
+								"available_qty": float(available_qty),
+								"missing_qty": float((required_qty - available_qty).quantize(Decimal("0.001"))),
+								"unit": unit,
+							}
+						)
+
+				if stock_code is None:
+					shortages.append(
+						{
+							"stock_code": None,
+							"required_qty": float(required_qty.quantize(Decimal("0.001"))),
+							"available_qty": None,
+							"missing_qty": float(required_qty.quantize(Decimal("0.001"))),
+							"unit": unit,
+							"reason": f"İç Gergi icin uygun stok karti bulunamadi.",
+						}
+					)
+
+				bom_lines.append(
+					{
+						"zone_type": line.zone_type,
+						"layer_level": float(line.layer_level) if line.layer_level is not None else None,
+						"required_thickness": float(line.required_thickness),
+						"stock_category": line_category,
+						"required_qty": float(required_qty.quantize(Decimal("0.001"))),
+						"unit": unit,
+						"stock_code": stock_code,
+						"stock_name": resolved_stock.stock_name if resolved_stock else None,
+						"available_qty": float(available_qty) if available_qty is not None else None,
+						"is_sufficient": is_sufficient,
+					}
+				)
 
 				continue
 

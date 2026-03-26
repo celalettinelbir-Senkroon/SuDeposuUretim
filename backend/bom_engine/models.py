@@ -162,7 +162,10 @@ class ReferenceBomLine(models.Model):
         ('BASE', 'Base Panel'),
         ('ROOF', 'Roof Panel'),
         ('COVER', 'Manhole / Cleaning Cover'),
-        ('ACCESSORY', 'Aksesuarlar (Merdiven vb.)')
+        ('ACCESSORY', 'Aksesuarlar (Merdiven vb.)'),
+        # köebent hesaplamalrı için eklendi.
+        ('EXTERNAL_ANGLE', 'Dış Köşebent / Destek'), 
+        ('INTERNAL_TIE', 'İç Gergi (Tij)')
     ]
 
     bom_header = models.ForeignKey(ReferenceBomHeader, on_delete=models.CASCADE, related_name='lines')

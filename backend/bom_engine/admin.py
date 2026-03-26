@@ -80,10 +80,10 @@ class StockCardResource(resources.ModelResource):
         row['Stok Kalınlık'] = thickness
         
         en_cm = clean_number(row.get('En (cm)'))
-        row['En (cm)'] = en_cm * 10 if en_cm is not None else None
+        row['En (cm)'] = en_cm * 10 if en_cm is not None else 0
 
         boy_cm = clean_number(row.get('Boy (cm)'))
-        row['Boy (cm)'] = boy_cm * 10 if boy_cm is not None else None
+        row['Boy (cm)'] = boy_cm * 10 if boy_cm is not None else 0
 
         # 2. Kategori Verisini Eşleştirme (Mapping) İşlemi
         # Sütun adını kendi Excel'indeki başlığa göre değiştirmeyi unutma!
