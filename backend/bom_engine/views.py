@@ -505,573 +505,345 @@ class TankCalculationView(APIView):
 		return JsonResponse(response_payload, status=200)
 
 
+# --- ORTAK YARDIMCI FONKSİYON ---
+def _evaluate_stock_and_build_line(stock_obj, required_qty, stock_map, base_line_data, unit="adet", missing_reason=None, extra_line_data=None):
+    """
+    Stok durumunu kontrol eder, yeterlilik durumunu hesaplar ve
+    BOM satırı ile (varsa) eksiklik (shortage) sözlüğünü döndürür.
+    """
+    stock_code = stock_obj.stock_code if stock_obj else None
+    available_qty = stock_map.get(stock_code) if stock_code else None
+    
+    is_sufficient = None
+    shortage = None
+
+    if stock_code and required_qty is not None and available_qty is not None:
+        is_sufficient = available_qty >= required_qty
+        if not is_sufficient:
+            shortage = {
+                "stock_code": stock_code,
+                "required_qty": float(required_qty),
+                "available_qty": float(available_qty),
+                "missing_qty": float((required_qty - available_qty).quantize(Decimal("0.001"))),
+                "unit": unit,
+            }
+    else:
+        # Stok kodu yok veya hesaplanamıyor
+        missing_qty_val = float(required_qty.quantize(Decimal("0.001"))) if required_qty is not None else None
+        shortage = {
+            "stock_code": stock_code,
+            "required_qty": missing_qty_val,
+            "available_qty": float(available_qty) if available_qty is not None else None,
+            "missing_qty": missing_qty_val,
+            "unit": unit,
+            "reason": missing_reason or "Uygun stok kartı veya bakiye bulunamadı.",
+        }
+
+    bom_line = {
+        **base_line_data,
+        "required_qty": float(required_qty.quantize(Decimal("0.001"))) if required_qty is not None else None,
+        "unit": unit,
+        "stock_code": stock_code,
+        "stock_name": stock_obj.stock_name if stock_obj else None,
+        "available_qty": float(available_qty) if available_qty is not None else None,
+        "is_sufficient": is_sufficient,
+    }
+
+    if extra_line_data:
+        bom_line.update(extra_line_data)
+
+    return bom_line, shortage
+
+
 class WarehouseRecipeCalculationView(APIView):
-	permission_classes = [AllowAny]
-
-	def post(self, request):
-		width_raw = request.data.get("en", request.data.get("width"))
-		length_raw = request.data.get("boy", request.data.get("length"))
-		height_raw = request.data.get("yukseklik", request.data.get("height"))
-		standard_raw = request.data.get("standart", request.data.get("standard"))
-		material_raw = request.data.get("malzeme", request.data.get("material_type"))
-		tank_type_raw = request.data.get("depo_tipi", request.data.get("tank_type"))
-		warehouse_stocks = request.data.get("depo_stoklari", request.data.get("warehouse_stocks", []))
-
-		if width_raw is None or length_raw is None or height_raw is None or not standard_raw:
-			return JsonResponse(
-				{
-					"detail": "'en', 'boy', 'yukseklik' ve 'standart' alanlari zorunludur."
-				},
-				status=400,
-			)
-
-		width = _to_decimal(width_raw)
-		length = _to_decimal(length_raw)
-		height = _to_decimal(height_raw)
-
-		if width is None or length is None or height is None:
-			return JsonResponse(
-				{"detail": "'en', 'boy' ve 'yukseklik' sayisal bir deger olmali."},
-				status=400,
-			)
-
-		if width <= 0 or length <= 0 or height <= 0:
-			return JsonResponse(
-				{"detail": "'en', 'boy' ve 'yukseklik' sifirdan buyuk olmali."},
-				status=400,
-			)
-
-		volume_m3 = width * length * height
-		capacity_ton = volume_m3
-		requirement_multiplier = Decimal("1.08") if _is_steel_tank(tank_type_raw) else Decimal("1")
-
-		standard = (
-			StandardCategory.objects.filter(name__iexact=str(standard_raw).strip())
-			.only("id", "name")
-			.first()
-		)
-
-		payload = {
-			"inputs": {
-				"en": float(width),
-				"boy": float(length),
-				"yukseklik": float(height),
-				"standart": str(standard_raw).strip(),
-				"malzeme": str(material_raw).strip() if material_raw else None,
-				"depo_tipi": str(tank_type_raw).strip() if tank_type_raw else None,
-			},
-			"calculation": {
-				"volume_m3": float(volume_m3.quantize(Decimal("0.001"))),
-				"capacity_ton": float(capacity_ton.quantize(Decimal("0.001"))),
-				"requirement_multiplier": float(requirement_multiplier),
-			},
-			"standard_found": bool(standard),
-		}
-
-		if not standard:
-			payload.update(
-				{
-					"matched_header": None,
-					"bom_lines": [],
-					"warehouse_check": {
-						"is_available": False,
-						"shortages": [],
-					},
-				}
-			)
-			return JsonResponse(payload, status=200)
-
-		headers = ReferenceBomHeader.objects.filter(
-			category=standard,
-			min_tonnage__lte=capacity_ton,
-			max_tonnage__gte=capacity_ton,
-		).order_by("min_tonnage")
-
-		if material_raw:
-			headers = headers.filter(material_type__icontains=str(material_raw).strip())
-
-		header = headers.select_related("category").first()
-
-		payload["matched_standard"] = {
-			"id": standard.id,
-			"name": standard.name,
-		}
-
-		if not header:
-			payload.update(
-				{
-					"matched_header": None,
-					"bom_lines": [],
-					"warehouse_check": {
-						"is_available": False,
-						"shortages": [],
-					},
-				}
-			)
-			return JsonResponse(payload, status=200)
-
-		lines_qs = (
-			ReferenceBomLine.objects.filter(bom_header=header)
-			.select_related("stock_card")
-			.order_by("total_module_height", "zone_type", "layer_level")
-		)
-		unique_heights = sorted({line.total_module_height for line in lines_qs})
-
-		if unique_heights:
-			selected_height = min(unique_heights, key=lambda h: abs(h - height))
-			selected_lines = [line for line in lines_qs if line.total_module_height == selected_height]
-		else:
-			selected_height = None
-			selected_lines = []
-
-		material_code = _resolve_material_code(material_raw or header.material_type)
-
-		stock_map = {}
-		if isinstance(warehouse_stocks, list):
-			for item in warehouse_stocks:
-				if not isinstance(item, dict):
-					continue
-				stock_code = item.get("stock_code")
-				qty = _to_decimal(item.get("qty", item.get("quantity")))
-				if stock_code and qty is not None:
-					stock_map[str(stock_code)] = qty
-
-		shortages = []
-		bom_lines = []
-		wall_layer_levels = sorted(
-			{
-				line.layer_level
-				for line in selected_lines
-				if line.zone_type == "WALL" and line.layer_level is not None
-			}
-		)
-		first_wall_layer = wall_layer_levels[0] if wall_layer_levels else None
-		layer_height_map = {}
-		previous_level = Decimal("0")
-		for level in wall_layer_levels:
-			layer_height = level - previous_level
-			if layer_height <= 0:
-				layer_height = Decimal("0.5")
-			layer_height_map[level] = layer_height
-			previous_level = level
-
-		for line in selected_lines:
-			line_category = _resolve_line_category(line)
-
-			if line.zone_type in {"BASE", "ROOF"} and line.required_thickness is not None:
-				surface_plan = _calculate_surface_panel_plan(
-					width=width,
-					length=length,
-					multiplier=requirement_multiplier,
-				)
-
-				for (panel_width_m, panel_length_m), panel_count in surface_plan.items():
-					required_qty = Decimal(panel_count)
-					if required_qty <= 0:
-						continue
-
-					resolved_stock = _resolve_stock_by_nominal_size(
-						required_thickness=line.required_thickness,
-						category_code2=line_category,
-						nominal_width_m=panel_width_m,
-						nominal_length_m=panel_length_m,
-						material_code=material_code,
-					)
-
-					stock_code = resolved_stock.stock_code if resolved_stock else None
-					available_qty = stock_map.get(stock_code) if stock_code else None
-					is_sufficient = None
-					panel_type_name = _get_panel_type_name(panel_width_m, panel_length_m)
-
-					if stock_code and available_qty is not None:
-						is_sufficient = available_qty >= required_qty
-						if not is_sufficient:
-							shortages.append(
-								{
-									"stock_code": stock_code,
-									"required_qty": float(required_qty),
-									"available_qty": float(available_qty),
-									"missing_qty": float((required_qty - available_qty).quantize(Decimal("0.001"))),
-									"unit": "adet",
-								}
-							)
-
-					if stock_code is None:
-						shortages.append(
-							{
-								"stock_code": None,
-								"required_qty": float(required_qty),
-								"available_qty": None,
-								"missing_qty": float(required_qty),
-								"unit": "adet",
-								"reason": f"{line.zone_type} icin {panel_width_m}x{panel_length_m}m ({panel_type_name}) panel stok karsiligi bulunamadi.",
-							}
-						)
-
-					bom_lines.append(
-						{
-							"zone_type": line.zone_type,
-							"layer_level": float(line.layer_level) if line.layer_level is not None else None,
-							"required_thickness": float(line.required_thickness),
-							"stock_category": line_category,
-							"panel_type": f"{panel_width_m}x{panel_length_m}",
-							"panel_type_name": panel_type_name,
-							"required_qty": float(required_qty),
-							"unit": "adet",
-							"stock_code": stock_code,
-							"stock_name": resolved_stock.stock_name if resolved_stock else None,
-							"available_qty": float(available_qty) if available_qty is not None else None,
-							"is_sufficient": is_sufficient,
-						}
-					)
-
-				continue
-
-			if line.zone_type == "WALL" and line.required_thickness is not None:
-				layer_height = layer_height_map.get(line.layer_level, Decimal("1"))
-				panel_mix = _calculate_wall_panel_mix(
-					width=width,
-					length=length,
-					layer_height=layer_height,
-					multiplier=requirement_multiplier,
-				)
-
-				# Ilk duvar katinda manhole girisi icin 1 panel dusulur.
-				is_first_wall_layer = first_wall_layer is not None and line.layer_level == first_wall_layer
-				if is_first_wall_layer:
-					if panel_mix["primary_qty"] > 0:
-						panel_mix["primary_qty"] -= Decimal("1")
-					elif panel_mix["secondary_qty"] > 0:
-						panel_mix["secondary_qty"] -= Decimal("1")
-
-				wall_parts = [
-					(panel_mix["primary_type"], panel_mix["primary_qty"]),
-					(panel_mix["secondary_type"], panel_mix["secondary_qty"]),
-				]
-
-				for panel_type, required_qty in wall_parts:
-					if required_qty <= 0:
-						continue
-
-					resolved_stock = _resolve_stock_by_thickness_and_size(
-						required_thickness=line.required_thickness,
-						panel_type=panel_type,
-						material_code=material_code,
-						category_code2=line_category,
-					)
-
-					stock_code = resolved_stock.stock_code if resolved_stock else None
-					available_qty = stock_map.get(stock_code) if stock_code else None
-					is_sufficient = None
-
-					if stock_code and available_qty is not None:
-						is_sufficient = available_qty >= required_qty
-						if not is_sufficient:
-							shortages.append(
-								{
-									"stock_code": stock_code,
-									"required_qty": float(required_qty),
-									"available_qty": float(available_qty),
-									"missing_qty": float((required_qty - available_qty).quantize(Decimal("0.001"))),
-									"unit": "adet",
-								}
-							)
-
-					if stock_code is None:
-						shortages.append(
-							{
-								"stock_code": None,
-								"required_qty": float(required_qty),
-								"available_qty": None,
-								"missing_qty": float(required_qty),
-								"unit": "adet",
-								"reason": f"{panel_type} panel icin uygun stok karti bulunamadi.",
-							}
-						)
-
-					bom_lines.append(
-						{
-							"zone_type": line.zone_type,
-							"layer_level": float(line.layer_level) if line.layer_level is not None else None,
-							"required_thickness": float(line.required_thickness),
-							"stock_category": line_category,
-							"panel_type": panel_type,
-							"required_qty": float(required_qty),
-							"unit": "adet",
-							"manhole_deducted": is_first_wall_layer,
-							"stock_code": stock_code,
-							"stock_name": resolved_stock.stock_name if resolved_stock else None,
-							"available_qty": float(available_qty) if available_qty is not None else None,
-							"is_sufficient": is_sufficient,
-						}
-					)
-
-				continue
-			#burada eğer köşebent bombeliyse gibi bir dallanma eklenmeli
-			if line.zone_type == "EXTERNAL_ANGLE" and line.required_thickness is not None:
-				# Dış Köşebent - Deponun 4 köşesine atılır.
-				required_qty = Decimal("4")
-				resolved_stocks = []
-
-				# Kalınlık BOM'dan (line.required_thickness) gelir.
-				# Köşebentin boyu deponun maksimum yüksekliği (height) olmalıdır.
-				resolved_stock = _resolve_stock_by_nominal_size(
-					required_thickness=line.required_thickness,
-					category_code2=line_category,
-					nominal_width_m=Decimal(),  # Köşebentin uzunluğu = Depo yüksekliği (Örn: 2.16)
-					nominal_length_m=height,  # Kendi veritabanı standartlarına göre ayarlayabilirsin
-					material_code=material_code,
-				)
-
-				if resolved_stock:
-					resolved_stocks.append((resolved_stock, required_qty))
-				else:
-					# Belirtilen ebatta bulunamazsa fallback olarak genel arama
-					fallback_stock = _resolve_stock_for_line(
-						line,
-						material_code=material_code,
-						category_code2=line_category,
-					)
-					if fallback_stock:
-						resolved_stocks.append((fallback_stock, required_qty))
-
-				# Her bir stok türü için eksik/yeterli kontrolü yap
-				unit = "adet"
-				
-				# Eğer resolved_stocks boşsa (stok hiç bulunamadıysa) döngüye girmeden hata basmak için:
-				if not resolved_stocks:
-					shortages.append(
-						{
-							"stock_code": None,
-							"required_qty": float(required_qty),
-							"available_qty": None,
-							"missing_qty": float(required_qty),
-							"unit": unit,
-							"reason": f"Dış Köşebent (Kalınlık: {line.required_thickness}mm, Boy: {height}m) için uygun stok kartı bulunamadı.",
-						}
-					)
-					
-				for stock_obj, qty in resolved_stocks:
-					stock_code = stock_obj.stock_code if stock_obj else None
-					available_qty = stock_map.get(stock_code) if stock_code else None
-					is_sufficient = None
-
-					if stock_code and available_qty is not None:
-						is_sufficient = available_qty >= qty
-						if not is_sufficient:
-							shortages.append(
-								{
-									"stock_code": stock_code,
-									"required_qty": float(qty),
-									"available_qty": float(available_qty),
-									"missing_qty": float((qty - available_qty).quantize(Decimal("0.001"))),
-									"unit": unit,
-								}
-							)
-					elif stock_code and available_qty is None:
-						# Stok kartı var ama envanterde miktar bilgisi yoksa
-						shortages.append(
-							{
-								"stock_code": stock_code,
-								"required_qty": float(qty),
-								"available_qty": 0.0,
-								"missing_qty": float(qty),
-								"unit": unit,
-								"reason": "Stok bakiyesi bulunamadı."
-							}
-						)
-
-					bom_lines.append(
-						{
-							"zone_type": line.zone_type,
-							"layer_level": float(line.layer_level) if line.layer_level is not None else None,
-							"required_thickness": float(line.required_thickness),
-							"stock_category": line_category,
-							"required_qty": float(qty),
-							"unit": unit,
-							"stock_code": stock_code,
-							"stock_name": stock_obj.stock_name if stock_obj else None,
-							"available_qty": float(available_qty) if available_qty is not None else None,
-							"is_sufficient": is_sufficient,
-						}
-					)
-
-				continue
-			if line.zone_type == "INTERNAL_TIE" and line.required_thickness is not None:
-				# İç Gergi - Height'a bağlı hesaplama
-				required_qty = (height / WALL_MODULE_HEIGHT_M).to_integral_value(rounding=ROUND_CEILING)
-				required_qty = required_qty * requirement_multiplier
-
-				# Kalınlıktan stok eşleştirmesi yap
-				resolved_stock = _resolve_stock_for_line(
-					line,
-					material_code=material_code,
-					category_code2=line_category,
-				)
-
-				stock_code = resolved_stock.stock_code if resolved_stock else None
-				available_qty = stock_map.get(stock_code) if stock_code else None
-				is_sufficient = None
-				unit = "adet"
-
-				if stock_code and available_qty is not None:
-					is_sufficient = available_qty >= required_qty
-					if not is_sufficient:
-						shortages.append(
-							{
-								"stock_code": stock_code,
-								"required_qty": float(required_qty.quantize(Decimal("0.001"))),
-								"available_qty": float(available_qty),
-								"missing_qty": float((required_qty - available_qty).quantize(Decimal("0.001"))),
-								"unit": unit,
-							}
-						)
-
-				if stock_code is None:
-					shortages.append(
-						{
-							"stock_code": None,
-							"required_qty": float(required_qty.quantize(Decimal("0.001"))),
-							"available_qty": None,
-							"missing_qty": float(required_qty.quantize(Decimal("0.001"))),
-							"unit": unit,
-							"reason": f"İç Gergi icin uygun stok karti bulunamadi.",
-						}
-					)
-
-				bom_lines.append(
-					{
-						"zone_type": line.zone_type,
-						"layer_level": float(line.layer_level) if line.layer_level is not None else None,
-						"required_thickness": float(line.required_thickness),
-						"stock_category": line_category,
-						"required_qty": float(required_qty.quantize(Decimal("0.001"))),
-						"unit": unit,
-						"stock_code": stock_code,
-						"stock_name": resolved_stock.stock_name if resolved_stock else None,
-						"available_qty": float(available_qty) if available_qty is not None else None,
-						"is_sufficient": is_sufficient,
-					}
-				)
-
-				continue
-
-
-
-
-			resolved_stock = _resolve_stock_for_line(
-				line,
-				material_code=material_code,
-				category_code2=line_category,
-			)
-			if line.zone_type in {"COVER", "ACCESSORY"}:
-				required_area_m2 = None
-				sheet_area_m2 = None
-				base_required_qty = Decimal("1")
-				required_qty = Decimal("1")
-			else:
-				required_area_m2 = _calculate_required_area_m2(line, width, length)
-				sheet_area_m2 = _stock_sheet_area_m2(resolved_stock)
-				required_piece_qty = _calculate_required_piece_qty(
-					required_area_m2=required_area_m2,
-					sheet_area_m2=sheet_area_m2,
-					multiplier=requirement_multiplier,
-				)
-
-				base_required_qty = required_area_m2.quantize(Decimal("0.001")) if required_area_m2 is not None else Decimal("1")
-				required_qty = required_piece_qty
-
-			stock_code = resolved_stock.stock_code if resolved_stock else None
-			available_qty = stock_map.get(stock_code) if stock_code else None
-			is_sufficient = None
-			unit = "adet"
-
-			if stock_code and available_qty is not None and required_qty is not None:
-				is_sufficient = available_qty >= required_qty
-				if not is_sufficient:
-					shortages.append(
-						{
-							"stock_code": stock_code,
-							"required_qty": float(required_qty.quantize(Decimal("0.001"))),
-							"available_qty": float(available_qty),
-							"missing_qty": float((required_qty - available_qty).quantize(Decimal("0.001"))),
-							"unit": unit,
-						}
-					)
-
-			if stock_code is None:
-				shortages.append(
-					{
-						"stock_code": None,
-						"required_qty": float(required_qty.quantize(Decimal("0.001"))) if required_qty is not None else None,
-						"available_qty": None,
-						"missing_qty": float(required_qty.quantize(Decimal("0.001"))) if required_qty is not None else None,
-						"unit": unit,
-						"reason": "Bu satir icin uygun stok karti bulunamadi.",
-					}
-				)
-
-			if stock_code and required_qty is None:
-				shortages.append(
-					{
-						"stock_code": stock_code,
-						"required_qty": None,
-						"available_qty": float(available_qty) if available_qty is not None else None,
-						"missing_qty": None,
-						"unit": unit,
-						"reason": "Stok kartinda panel ebatlari (bom_width_mm, bom_length_mm) eksik oldugu icin adet hesabi yapilamadi.",
-					}
-				)
-
-			bom_lines.append(
-				{
-					"zone_type": line.zone_type,
-					"layer_level": float(line.layer_level) if line.layer_level is not None else None,
-					"required_thickness": float(line.required_thickness) if line.required_thickness is not None else None,
-					"stock_category": line_category,
-					"base_required_qty": float(base_required_qty.quantize(Decimal("0.001"))),
-					"required_qty": float(required_qty.quantize(Decimal("0.001"))) if required_qty is not None else None,
-					"unit": unit,
-					"sheet_area_m2": float(sheet_area_m2.quantize(Decimal("0.001"))) if sheet_area_m2 is not None else None,
-					"stock_code": stock_code,
-					"stock_name": resolved_stock.stock_name if resolved_stock else None,
-					"available_qty": float(available_qty) if available_qty is not None else None,
-					"is_sufficient": is_sufficient,
-				}
-			)
-
-
-
-
-		# Aksesuar ve Merdivenler: Height'e göre otomatik seçim ve BOM'a ekleme
-		# Tüm aksesuar stoklarını (Dış Merdiven, İç Merdiven, Pabuç vb.) çek
-		
-		# İç merdiven türünü malzeme tipinden belirle (depo materyaline göre Çelik/GRP)
-		
-		# Height'e göre uygun merdivenler ve aksesuarları BOM'a ekle
-		bom_lines = _add_ladders_to_bom(
-			tank_height_m=float(height),
-			bom_lines=bom_lines,
-			inner_ladder_type="Çelik", # ileride grp ve çelik seçtireceğim.
-		)
-
-		payload["matched_header"] = {
-			"id": header.id,
-			"material_type": header.material_type,
-			"tonnage_range": {
-				"min": header.min_tonnage,
-				"max": header.max_tonnage,
-			},
-			"selected_module_height": float(selected_height) if selected_height is not None else None,
-		}
-		payload["bom_lines"] = bom_lines
-		payload["warehouse_check"] = {
-			"is_available": len(shortages) == 0,
-			"shortages": shortages,
-		}
-
-		return JsonResponse(payload, status=200)
-
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        # 1. Girdileri Al
+        width_raw = request.data.get("en", request.data.get("width"))
+        length_raw = request.data.get("boy", request.data.get("length"))
+        height_raw = request.data.get("yukseklik", request.data.get("height"))
+        standard_raw = request.data.get("standart", request.data.get("standard"))
+        material_raw = request.data.get("malzeme", request.data.get("material_type"))
+        tank_type_raw = request.data.get("depo_tipi", request.data.get("tank_type"))
+        warehouse_stocks = request.data.get("depo_stoklari", request.data.get("warehouse_stocks", []))
+
+        # 2. Validasyonlar
+        if width_raw is None or length_raw is None or height_raw is None or not standard_raw:
+            return JsonResponse({"detail": "'en', 'boy', 'yukseklik' ve 'standart' alanlari zorunludur."}, status=400)
+
+        width = _to_decimal(width_raw)
+        length = _to_decimal(length_raw)
+        height = _to_decimal(height_raw)
+
+        if width is None or length is None or height is None:
+            return JsonResponse({"detail": "'en', 'boy' ve 'yukseklik' sayisal bir deger olmali."}, status=400)
+
+        if width <= 0 or length <= 0 or height <= 0:
+            return JsonResponse({"detail": "'en', 'boy' ve 'yukseklik' sifirdan buyuk olmali."}, status=400)
+
+        # 3. Temel Depo Hesaplamaları
+        volume_m3 = width * length * height
+        capacity_ton = volume_m3
+        requirement_multiplier = Decimal("1.08") if _is_steel_tank(tank_type_raw) else Decimal("1")
+        material_code = _resolve_material_code(material_raw or "")
+
+        standard = StandardCategory.objects.filter(name__iexact=str(standard_raw).strip()).only("id", "name").first()
+
+        payload = {
+            "inputs": {
+                "en": float(width),
+                "boy": float(length),
+                "yukseklik": float(height),
+                "standart": str(standard_raw).strip(),
+                "malzeme": str(material_raw).strip() if material_raw else None,
+                "depo_tipi": str(tank_type_raw).strip() if tank_type_raw else None,
+            },
+            "calculation": {
+                "volume_m3": float(volume_m3.quantize(Decimal("0.001"))),
+                "capacity_ton": float(capacity_ton.quantize(Decimal("0.001"))),
+                "requirement_multiplier": float(requirement_multiplier),
+            },
+            "standard_found": bool(standard),
+        }
+
+        if not standard:
+            self._apply_empty_state(payload)
+            return JsonResponse(payload, status=200)
+
+        # 4. BOM Header Eşleştirme
+        headers = ReferenceBomHeader.objects.filter(
+            category=standard,
+            min_tonnage__lte=capacity_ton,
+            max_tonnage__gte=capacity_ton,
+        ).order_by("min_tonnage")
+
+        if material_raw:
+            headers = headers.filter(material_type__icontains=str(material_raw).strip())
+
+        header = headers.select_related("category").first()
+
+        payload["matched_standard"] = {"id": standard.id, "name": standard.name}
+
+        if not header:
+            self._apply_empty_state(payload)
+            return JsonResponse(payload, status=200)
+
+        # 5. Modül Yüksekliğine Göre Satırları Seçme
+        lines_qs = ReferenceBomLine.objects.filter(bom_header=header).select_related("stock_card").order_by("total_module_height", "zone_type", "layer_level")
+        unique_heights = sorted({line.total_module_height for line in lines_qs})
+
+        if unique_heights:
+            selected_height = min(unique_heights, key=lambda h: abs(h - height))
+            selected_lines = [line for line in lines_qs if line.total_module_height == selected_height]
+        else:
+            selected_height = None
+            selected_lines = []
+
+        # 6. Stok Verilerini Hazırlama
+        stock_map = {}
+        if isinstance(warehouse_stocks, list):
+            for item in warehouse_stocks:
+                if not isinstance(item, dict): continue
+                stock_code = item.get("stock_code")
+                qty = _to_decimal(item.get("qty", item.get("quantity")))
+                if stock_code and qty is not None:
+                    stock_map[str(stock_code)] = qty
+
+        # 7. Duvar Katman (Layer) Hazırlıkları
+        wall_layer_levels = sorted({line.layer_level for line in selected_lines if line.zone_type == "WALL" and line.layer_level is not None})
+        first_wall_layer = wall_layer_levels[0] if wall_layer_levels else None
+        
+        layer_height_map = {}
+        previous_level = Decimal("0")
+        for level in wall_layer_levels:
+            layer_height = level - previous_level
+            if layer_height <= 0:
+                layer_height = Decimal("0.5")
+            layer_height_map[level] = layer_height
+            previous_level = level
+
+        shortages = []
+        bom_lines = []
+
+        # 8. BOM Satırlarını İşleme (Yönlendirme Döngüsü)
+        for line in selected_lines:
+            line_category = _resolve_line_category(line)
+            
+            base_line_data = {
+                "zone_type": line.zone_type,
+                "layer_level": float(line.layer_level) if line.layer_level is not None else None,
+                "required_thickness": float(line.required_thickness) if line.required_thickness is not None else None,
+                "stock_category": line_category,
+            }
+
+            if line.zone_type in {"BASE", "ROOF"} and line.required_thickness is not None:
+                self._process_base_roof(line, width, length, requirement_multiplier, material_code, line_category, stock_map, base_line_data, bom_lines, shortages)
+            
+            elif line.zone_type == "WALL" and line.required_thickness is not None:
+                self._process_wall(line, width, length, requirement_multiplier, material_code, line_category, layer_height_map, first_wall_layer, stock_map, base_line_data, bom_lines, shortages)
+            
+            elif line.zone_type == "EXTERNAL_ANGLE" and line.required_thickness is not None:
+                self._process_external_angle(line, height, material_code, line_category, stock_map, base_line_data, bom_lines, shortages)
+            
+            elif line.zone_type == "INTERNAL_TIE" and line.required_thickness is not None:
+                self._process_internal_tie(line, height, requirement_multiplier, material_code, line_category, stock_map, base_line_data, bom_lines, shortages)
+            
+            else:
+                self._process_fallback_and_accessories(line, width, length, requirement_multiplier, material_code, line_category, stock_map, base_line_data, bom_lines, shortages)
+
+        # 9. Merdiven ve Aksesuar Eklemesi
+        bom_lines = _add_ladders_to_bom(
+            tank_height_m=float(height),
+            bom_lines=bom_lines,
+            inner_ladder_type="Çelik", 
+        )
+
+        # 10. Yanıtı Döndürme
+        payload["matched_header"] = {
+            "id": header.id,
+            "material_type": header.material_type,
+            "tonnage_range": {"min": header.min_tonnage, "max": header.max_tonnage},
+            "selected_module_height": float(selected_height) if selected_height is not None else None,
+        }
+        payload["bom_lines"] = bom_lines
+        payload["warehouse_check"] = {
+            "is_available": len(shortages) == 0,
+            "shortages": shortages,
+        }
+
+        return JsonResponse(payload, status=200)
+
+    # ==========================================
+    # YARDIMCI İŞ KURALI METODLARI (Sınıf İçi)
+    # ==========================================
+
+    def _apply_empty_state(self, payload):
+        payload.update({
+            "matched_header": None,
+            "bom_lines": [],
+            "warehouse_check": {
+                "is_available": False,
+                "shortages": [],
+            },
+        })
+
+    def _process_base_roof(self, line, width, length, multiplier, material_code, line_category, stock_map, base_data, bom_lines, shortages):
+        surface_plan = _calculate_surface_panel_plan(width=width, length=length, multiplier=multiplier)
+
+        for (panel_width_m, panel_length_m), panel_count in surface_plan.items():
+            required_qty = Decimal(panel_count)
+            if required_qty <= 0: continue
+
+            resolved_stock = _resolve_stock_by_nominal_size(
+                required_thickness=line.required_thickness, category_code2=line_category,
+                nominal_width_m=panel_width_m, nominal_length_m=panel_length_m, material_code=material_code
+            )
+            
+            panel_type_name = _get_panel_type_name(panel_width_m, panel_length_m)
+            extra_data = {
+                "panel_type": f"{panel_width_m}x{panel_length_m}",
+                "panel_type_name": panel_type_name
+            }
+            reason = f"{line.zone_type} icin {panel_width_m}x{panel_length_m}m ({panel_type_name}) panel stok karsiligi bulunamadi."
+            
+            b_line, s_line = _evaluate_stock_and_build_line(resolved_stock, required_qty, stock_map, base_data, missing_reason=reason, extra_line_data=extra_data)
+            bom_lines.append(b_line)
+            if s_line: shortages.append(s_line)
+
+    def _process_wall(self, line, width, length, multiplier, material_code, line_category, layer_height_map, first_wall_layer, stock_map, base_data, bom_lines, shortages):
+        layer_height = layer_height_map.get(line.layer_level, Decimal("1"))
+        panel_mix = _calculate_wall_panel_mix(width=width, length=length, layer_height=layer_height, multiplier=multiplier)
+
+        # Menhol düşülmesi
+        is_first_wall_layer = first_wall_layer is not None and line.layer_level == first_wall_layer
+        if is_first_wall_layer:
+            if panel_mix["primary_qty"] > 0:
+                panel_mix["primary_qty"] -= Decimal("1")
+            elif panel_mix["secondary_qty"] > 0:
+                panel_mix["secondary_qty"] -= Decimal("1")
+
+        wall_parts = [
+            (panel_mix["primary_type"], panel_mix["primary_qty"]),
+            (panel_mix["secondary_type"], panel_mix["secondary_qty"]),
+        ]
+
+        for panel_type, required_qty in wall_parts:
+            if required_qty <= 0: continue
+
+            resolved_stock = _resolve_stock_by_thickness_and_size(
+                required_thickness=line.required_thickness, panel_type=panel_type,
+                material_code=material_code, category_code2=line_category
+            )
+            
+            extra_data = {
+                "panel_type": panel_type,
+                "manhole_deducted": is_first_wall_layer
+            }
+            reason = f"{panel_type} panel icin uygun stok karti bulunamadi."
+
+            b_line, s_line = _evaluate_stock_and_build_line(resolved_stock, required_qty, stock_map, base_data, missing_reason=reason, extra_line_data=extra_data)
+            bom_lines.append(b_line)
+            if s_line: shortages.append(s_line)
+
+    def _process_external_angle(self, line, height, material_code, line_category, stock_map, base_data, bom_lines, shortages):
+        required_qty = Decimal("4")
+        resolved_stock = _resolve_stock_by_nominal_size(
+            required_thickness=line.required_thickness, category_code2=line_category,
+            nominal_width_m=Decimal(), nominal_length_m=height, material_code=material_code
+        )
+
+        if not resolved_stock:
+            resolved_stock = _resolve_stock_for_line(line, material_code=material_code, category_code2=line_category)
+
+        reason = f"Dış Köşebent (Kalınlık: {line.required_thickness}mm, Boy: {height}m) için uygun stok kartı bulunamadı."
+        b_line, s_line = _evaluate_stock_and_build_line(resolved_stock, required_qty, stock_map, base_data, missing_reason=reason)
+        
+        bom_lines.append(b_line)
+        if s_line: shortages.append(s_line)
+
+    def _process_internal_tie(self, line, height, multiplier, material_code, line_category, stock_map, base_data, bom_lines, shortages):
+        WALL_MODULE_HEIGHT_M = Decimal("1.08") # Sabitin bu scope'da tanımlı olduğunu varsayıyoruz
+        required_qty = (height / WALL_MODULE_HEIGHT_M).to_integral_value(rounding=ROUND_CEILING) * multiplier
+
+        resolved_stock = _resolve_stock_for_line(line, material_code=material_code, category_code2=line_category)
+        reason = "İç Gergi icin uygun stok karti bulunamadi."
+
+        b_line, s_line = _evaluate_stock_and_build_line(resolved_stock, required_qty, stock_map, base_data, missing_reason=reason)
+        bom_lines.append(b_line)
+        if s_line: shortages.append(s_line)
+
+    def _process_fallback_and_accessories(self, line, width, length, multiplier, material_code, line_category, stock_map, base_data, bom_lines, shortages):
+        resolved_stock = _resolve_stock_for_line(line, material_code=material_code, category_code2=line_category)
+        
+        if line.zone_type in {"COVER", "ACCESSORY"}:
+            required_area_m2 = None
+            sheet_area_m2 = None
+            base_required_qty = Decimal("1")
+            required_qty = Decimal("1")
+        else:
+            required_area_m2 = _calculate_required_area_m2(line, width, length)
+            sheet_area_m2 = _stock_sheet_area_m2(resolved_stock)
+            required_qty = _calculate_required_piece_qty(
+                required_area_m2=required_area_m2,
+                sheet_area_m2=sheet_area_m2,
+                multiplier=multiplier,
+            )
+            base_required_qty = required_area_m2.quantize(Decimal("0.001")) if required_area_m2 is not None else Decimal("1")
+
+        extra_data = {
+            "base_required_qty": float(base_required_qty.quantize(Decimal("0.001"))),
+            "sheet_area_m2": float(sheet_area_m2.quantize(Decimal("0.001"))) if sheet_area_m2 is not None else None,
+        }
+        
+        reason = "Bu satir icin uygun stok karti bulunamadi." if not resolved_stock else "Stok kartinda panel ebatlari eksik oldugu icin adet hesabi yapilamadi."
+
+        b_line, s_line = _evaluate_stock_and_build_line(resolved_stock, required_qty, stock_map, base_data, missing_reason=reason, extra_line_data=extra_data)
+        bom_lines.append(b_line)
+        if s_line: shortages.append(s_line)
+        
+        
+        
 
 def _add_ladders_to_bom(tank_height_m, bom_lines, inner_ladder_type="Çelik"):
     """
