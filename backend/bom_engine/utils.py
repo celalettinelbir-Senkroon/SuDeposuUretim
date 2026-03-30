@@ -155,8 +155,8 @@ def _get_panel_dimensions_for_type(panel_type):
 def _calculate_gasket_length_for_panels(required_qty, nominal_width_m, nominal_length_m, resolved_stock=None):
     if required_qty is None or required_qty <= 0: return Decimal("0")
     if resolved_stock and resolved_stock.bom_width_mm and resolved_stock.bom_length_mm:
-        width_m = Decimal(resolved_stock.bom_width_mm) / Decimal("1000")
-        length_m = Decimal(resolved_stock.bom_length_mm) / Decimal("1000")
+        width_m = Decimal(resolved_stock.bom_width_mm) / Decimal("1080")#burada panel metresini parametreik vermemiz gerekiyor.
+        length_m = Decimal(resolved_stock.bom_length_mm) / Decimal("1080")
     else:
         width_m = nominal_width_m
         length_m = nominal_length_m

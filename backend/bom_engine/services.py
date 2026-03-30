@@ -86,20 +86,28 @@ def _resolve_manhole_stock(required_thickness=None, material_code=None):
     stocks = list(queryset.order_by("is_passive", "stock_code"))
     return stocks[0] if stocks else None
 
-def _resolve_conta_stock(material_code=None):
+def _resolve_conta_stock(zone_type, material_code=None):
     queryset = StockCard.objects.filter(
         Q(bom_category_code2__icontains="conta") | Q(stock_name__icontains="conta")
     )
-    if material_code:
-        queryset = queryset.filter(
-            Q(bom_category_code1__icontains=material_code) | Q(bom_category_code2__icontains=material_code) |
-            Q(bom_category_code3__icontains=material_code) | Q(bom_category_code4__icontains=material_code)
-        )
+    # if material_code:
+    #     queryset = queryset.filter(
+    #         Q(bom_category_code1__icontains=material_code) | Q(bom_category_code2__icontains=material_code) |
+    #         Q(bom_category_code3__icontains=material_code) | Q(bom_category_code4__icontains=material_code)
+    #     )
+    if zone_type == "BASE":
+        queryset = queryset.filter(stock_name__icontains="Taban Contası")
+    if zone_type == "ROOF":
+        queryset = queryset.filter(stock_name__icontains="Tavan Contası")
+    if zone_type == "WALL":
+        queryset = queryset.filter(stock_name__icontains="Modül Contası")
+    if zone_type == "EXTERNAL_ANGLE":
+        queryset = queryset.filter(stock_name__icontains="Köşebent Contası")
     return queryset.order_by("is_passive", "stock_code").first()
 
 def _append_conta_bom_line(bom_lines, shortages, stock_map, zone_type, required_qty, material_code):
     if required_qty is None or required_qty <= 0: return
-    stock_obj = _resolve_conta_stock(material_code=material_code)
+    stock_obj = _resolve_conta_stock(zone_type, material_code=material_code)
     stock_code = stock_obj.stock_code if stock_obj else None
     available_qty = stock_map.get(stock_code) if stock_code else None
     is_sufficient = None
@@ -153,7 +161,7 @@ def build_empty_payload(payload):
         "warehouse_check": { "is_available": False, "shortages": [] },
     })
 
-def process_base_roof(line, width, length, multiplier, material_code, line_category, stock_map, base_data, bom_lines, shortages):
+def process_base_roof(line, width, length, multiplier, material_code, line_category, stock_map, base_data, bom_lines, shortages, conta_totals):
     surface_plan = _calculate_surface_panel_plan(width=width, length=length, multiplier=multiplier)
     conta_length = Decimal("0")
     for (panel_width_m, panel_length_m), panel_count in surface_plan.items():
@@ -174,9 +182,9 @@ def process_base_roof(line, width, length, multiplier, material_code, line_categ
         bom_lines.append(b_line)
         if s_line: shortages.append(s_line)
     if conta_length > 0:
-        _append_conta_bom_line(bom_lines, shortages, stock_map, line.zone_type, conta_length, material_code)
+        conta_totals[line.zone_type] = conta_totals.get(line.zone_type, Decimal("0")) + conta_length
 
-def process_wall(line, width, length, multiplier, material_code, line_category, layer_height_map, first_wall_layer, stock_map, base_data, bom_lines, shortages):
+def process_wall(line, width, length, multiplier, material_code, line_category, layer_height_map, first_wall_layer, stock_map, base_data, bom_lines, shortages, conta_totals):
     layer_height = layer_height_map.get(line.layer_level, Decimal("1"))
     panel_mix = _calculate_wall_panel_mix(width=width, length=length, layer_height=layer_height, multiplier=multiplier)
     is_first_wall_layer = first_wall_layer is not None and line.layer_level == first_wall_layer
@@ -207,7 +215,7 @@ def process_wall(line, width, length, multiplier, material_code, line_category, 
         bom_lines.append(b_line)
         if s_line: shortages.append(s_line)
     if conta_length > 0:
-        _append_conta_bom_line(bom_lines, shortages, stock_map, "WALL", conta_length, material_code)
+        conta_totals["WALL"] = conta_totals.get("WALL", Decimal("0")) + conta_length
 
 def process_external_angle(line, height, material_code, line_category, stock_map, base_data, bom_lines, shortages):
     required_qty = Decimal("4")
@@ -378,6 +386,7 @@ def calculate_warehouse_recipe(width, length, height, standard_raw, material_raw
 
     shortages = []
     bom_lines = []
+    conta_totals = {}
 
     for line in selected_lines:
         line_category = _resolve_line_category(line)
@@ -388,15 +397,40 @@ def calculate_warehouse_recipe(width, length, height, standard_raw, material_raw
         }
 
         if line.zone_type in {"BASE", "ROOF"} and line.required_thickness is not None:
-            process_base_roof(line, width, length, requirement_multiplier, material_code, line_category, stock_map, base_line_data, bom_lines, shortages)
+            process_base_roof(line, width, length, requirement_multiplier, material_code, line_category, stock_map, base_line_data, bom_lines, shortages, conta_totals)
         elif line.zone_type == "WALL" and line.required_thickness is not None:
-            process_wall(line, width, length, requirement_multiplier, material_code, line_category, layer_height_map, first_wall_layer, stock_map, base_line_data, bom_lines, shortages)
+            process_wall(line, width, length, requirement_multiplier, material_code, line_category, layer_height_map, first_wall_layer, stock_map, base_line_data, bom_lines, shortages, conta_totals)
         elif line.zone_type == "EXTERNAL_ANGLE" and line.required_thickness is not None:
             process_external_angle(line, height, material_code, line_category, stock_map, base_line_data, bom_lines, shortages)
         elif line.zone_type == "INTERNAL_TIE" and line.required_thickness is not None:
             process_internal_tie(line, height, requirement_multiplier, material_code, line_category, stock_map, base_line_data, bom_lines, shortages)
         else:
             process_fallback_and_accessories(line, width, length, requirement_multiplier, material_code, line_category, stock_map, base_line_data, bom_lines, shortages)
+
+    w_plus_l = width + length
+    scaled_boundary = Decimal("2") * w_plus_l * requirement_multiplier
+
+    base_perim_sum = conta_totals.get("BASE", Decimal("0"))
+    if base_perim_sum > 0:
+        taban_conta = (base_perim_sum + scaled_boundary) / Decimal("2")
+        _append_conta_bom_line(bom_lines, shortages, stock_map, "BASE", taban_conta, material_code)
+
+    roof_perim_sum = conta_totals.get("ROOF", Decimal("0"))
+    if roof_perim_sum > 0:
+        tavan_conta = (roof_perim_sum + scaled_boundary) / Decimal("2")
+        _append_conta_bom_line(bom_lines, shortages, stock_map, "ROOF", tavan_conta, material_code)
+
+    wall_perim_sum = conta_totals.get("WALL", Decimal("0"))
+    if wall_perim_sum > 0:
+        kosebent_conta = Decimal("4") * height
+        total_wall_joints = (wall_perim_sum - Decimal("2") * scaled_boundary) / Decimal("2")
+        modul_conta = total_wall_joints - kosebent_conta
+        if modul_conta < Decimal("0"):
+            modul_conta = Decimal("0")
+
+        _append_conta_bom_line(bom_lines, shortages, stock_map, "WALL", modul_conta, material_code)
+        if kosebent_conta > 0:
+            _append_conta_bom_line(bom_lines, shortages, stock_map, "EXTERNAL_ANGLE", kosebent_conta, material_code)
 
     bom_lines = _add_ladders_to_bom(tank_height_m=float(height), bom_lines=bom_lines, inner_ladder_type="Çelik")
 
